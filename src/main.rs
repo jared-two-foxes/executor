@@ -1,9 +1,12 @@
 use clap::{Parser, Subcommand};
 use git2::{ApplyLocation, Diff, FileMode, Repository, RepositoryOpenFlags};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     env, fs,
-    io::{self, Read},
+    fs::OpenOptions,
+    io::Write,
+    io::{self, Read, Seek, SeekFrom},
     path::{Component, Path, PathBuf},
     process::ExitCode,
 };
@@ -25,8 +28,55 @@ enum Command {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Input {
+struct PatchInput {
     patches: Vec<PatchSource>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OperationInput {
+    operations: Vec<Operation>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Input {
+    Patches(PatchInput),
+    Operations(OperationInput),
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+enum Operation {
+    Patch {
+        source: PatchSource,
+    },
+    CreateFile {
+        path: PathBuf,
+        content: String,
+    },
+    ReplaceFile {
+        path: PathBuf,
+        expected_sha256: String,
+        content: String,
+    },
+    DeleteFile {
+        path: PathBuf,
+    },
+    MoveFile {
+        from: PathBuf,
+        to: PathBuf,
+    },
+    CreateDirectory {
+        path: PathBuf,
+    },
+    DeleteDirectory {
+        path: PathBuf,
+    },
+    MoveDirectory {
+        from: PathBuf,
+        to: PathBuf,
+    },
 }
 
 #[derive(Deserialize)]
@@ -58,9 +108,14 @@ impl PatchSource {
 #[derive(Serialize)]
 struct Outcome {
     success: bool,
-    patches_applied: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    patches_applied: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    operations_applied: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     failed_patch: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failed_operation: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
@@ -69,9 +124,33 @@ impl Outcome {
     fn failure(applied: usize, failed_patch: Option<usize>, error: String) -> Self {
         Self {
             success: false,
-            patches_applied: applied,
+            patches_applied: Some(applied),
+            operations_applied: None,
             failed_patch,
+            failed_operation: None,
             error: Some(error),
+        }
+    }
+
+    fn operation_failure(applied: usize, failed_operation: usize, error: String) -> Self {
+        Self {
+            success: false,
+            patches_applied: None,
+            operations_applied: Some(applied),
+            failed_patch: None,
+            failed_operation: Some(failed_operation),
+            error: Some(error),
+        }
+    }
+
+    fn success(applied: usize, operations: bool) -> Self {
+        Self {
+            success: true,
+            patches_applied: (!operations).then_some(applied),
+            operations_applied: operations.then_some(applied),
+            failed_patch: None,
+            failed_operation: None,
+            error: None,
         }
     }
 }
@@ -137,19 +216,142 @@ fn run(input_path: &Path) -> Result<Outcome, String> {
         return Err("Current directory must be the Git repository root".into());
     }
 
-    for (index, source) in input.patches.iter().enumerate() {
-        if let Err(error) = source
-            .read()
-            .and_then(|patch| apply_patch(&repo, &root, &patch))
-        {
-            return Ok(Outcome::failure(index, Some(index), error));
+    match input {
+        Input::Patches(input) => {
+            for (index, source) in input.patches.iter().enumerate() {
+                if let Err(error) = source
+                    .read()
+                    .and_then(|patch| apply_patch(&repo, &root, &patch))
+                {
+                    return Ok(Outcome::failure(index, Some(index), error));
+                }
+            }
+            Ok(Outcome::success(input.patches.len(), false))
+        }
+        Input::Operations(input) => {
+            for (index, operation) in input.operations.iter().enumerate() {
+                if let Err(error) = apply_operation(&repo, &root, operation) {
+                    return Ok(Outcome::operation_failure(index, index, error));
+                }
+            }
+            Ok(Outcome::success(input.operations.len(), true))
         }
     }
-    Ok(Outcome {
-        success: true,
-        patches_applied: input.patches.len(),
-        failed_patch: None,
-        error: None,
+}
+
+fn apply_operation(repo: &Repository, root: &Path, operation: &Operation) -> Result<(), String> {
+    match operation {
+        Operation::Patch { source } => {
+            let patch = source.read()?;
+            apply_patch(repo, root, &patch)
+        }
+        Operation::CreateFile { path, content } => {
+            let path = safe_path(root, path)?;
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .map_err(|e| format!("Cannot create file {}: {e}", path.display()))?;
+            file.write_all(content.as_bytes())
+                .map_err(|e| format!("Cannot write file {}: {e}", path.display()))
+        }
+        Operation::ReplaceFile {
+            path,
+            expected_sha256,
+            content,
+        } => replace_file(root, path, expected_sha256, content),
+        Operation::DeleteFile { path } => {
+            let path = safe_path(root, path)?;
+            require_kind(&path, false)?;
+            fs::remove_file(&path)
+                .map_err(|e| format!("Cannot delete file {}: {e}", path.display()))
+        }
+        Operation::MoveFile { from, to } => move_path(root, from, to, false),
+        Operation::CreateDirectory { path } => {
+            let path = safe_path(root, path)?;
+            fs::create_dir(&path)
+                .map_err(|e| format!("Cannot create directory {}: {e}", path.display()))
+        }
+        Operation::DeleteDirectory { path } => {
+            let path = safe_path(root, path)?;
+            require_kind(&path, true)?;
+            fs::remove_dir(&path)
+                .map_err(|e| format!("Cannot delete directory {}: {e}", path.display()))
+        }
+        Operation::MoveDirectory { from, to } => move_path(root, from, to, true),
+    }
+}
+
+fn replace_file(
+    root: &Path,
+    relative: &Path,
+    expected_sha256: &str,
+    content: &str,
+) -> Result<(), String> {
+    if expected_sha256.len() != 64
+        || !expected_sha256
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
+        return Err("expected_sha256 must be 64 lowercase hexadecimal characters".into());
+    }
+    let path = safe_path(root, relative)?;
+    require_kind(&path, false)?;
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .map_err(|e| format!("Cannot open file {}: {e}", path.display()))?;
+    let mut current = Vec::new();
+    file.read_to_end(&mut current)
+        .map_err(|e| format!("Cannot read file {}: {e}", path.display()))?;
+    let actual = format!("{:x}", Sha256::digest(&current));
+    if actual != expected_sha256 {
+        return Err(format!("File content hash mismatch: {}", path.display()));
+    }
+    file.set_len(0)
+        .map_err(|e| format!("Cannot truncate file {}: {e}", path.display()))?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(|e| format!("Cannot seek file {}: {e}", path.display()))?;
+    file.write_all(content.as_bytes())
+        .map_err(|e| format!("Cannot write file {}: {e}", path.display()))
+}
+
+fn safe_path(root: &Path, relative: &Path) -> Result<PathBuf, String> {
+    validate_path(root, relative)?;
+    Ok(root.join(relative))
+}
+
+fn require_kind(path: &Path, directory: bool) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|e| format!("Cannot inspect {}: {e}", path.display()))?;
+    if metadata.is_dir() == directory && (directory || metadata.is_file()) {
+        Ok(())
+    } else {
+        Err(format!("Unexpected file type: {}", path.display()))
+    }
+}
+
+fn move_path(root: &Path, from: &Path, to: &Path, directory: bool) -> Result<(), String> {
+    let source = safe_path(root, from)?;
+    let target = safe_path(root, to)?;
+    require_kind(&source, directory)?;
+    match fs::symlink_metadata(&target) {
+        Ok(_) => return Err(format!("Destination already exists: {}", target.display())),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(format!(
+                "Cannot inspect destination {}: {e}",
+                target.display()
+            ));
+        }
+    }
+    fs::rename(&source, &target).map_err(|e| {
+        format!(
+            "Cannot move {} to {}: {e}",
+            source.display(),
+            target.display()
+        )
     })
 }
 
