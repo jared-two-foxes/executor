@@ -2,7 +2,7 @@
 name = "executor"
 version = "0.1.0"
 edition = "2024"
-description = "Apply ordered Git patches to the current working directory"
+description = "Apply ordered Git patches and file operations to the current working directory"
 license = "GPL-3.0-only"
 
 [dependencies]

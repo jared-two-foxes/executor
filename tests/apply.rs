@@ -30,7 +30,11 @@ impl Fixture {
         Self { dir, repo }
     }
     fn apply(&self, patches: &[String]) -> Value {
-        self.raw(&json!({ "patches": patches }).to_string(), self.dir.path())
+        let operations: Vec<_> = patches
+            .iter()
+            .map(|patch| json!({"type":"patch", "source":{"type":"inline", "patch":patch}}))
+            .collect();
+        self.raw(&json!({ "operations": operations }).to_string(), self.dir.path())
     }
     fn raw(&self, input: &str, cwd: &Path) -> Value {
         // Keep the input outside the target repository.
@@ -96,7 +100,7 @@ fn successful_application_only_changes_workdir() {
     let index = fs::read(f.repo.path().join("index")).unwrap();
     assert_eq!(
         f.apply(&[change("example.txt", "original", "updated")]),
-        json!({"success":true,"patches_applied":1})
+        json!({"success":true,"operations_applied":1})
     );
     assert_eq!(f.content("example.txt"), "updated\n");
     assert_eq!(fs::read(f.repo.path().join("index")).unwrap(), index);
@@ -110,7 +114,7 @@ fn multiple_patches_and_sequential_dependencies() {
         change("nested/new.txt", "first", "second"),
         change("example.txt", "original", "updated"),
     ]);
-    assert_eq!(result, json!({"success":true,"patches_applied":3}));
+    assert_eq!(result, json!({"success":true,"operations_applied":3}));
     assert_eq!(f.content("nested/new.txt"), "second\n");
 }
 #[test]
@@ -150,8 +154,8 @@ fn conflicting_patch_stops_after_partial_success() {
         add("never.txt", "never"),
     ]);
     assert_eq!(result["success"], false);
-    assert_eq!(result["patches_applied"], 1);
-    assert_eq!(result["failed_patch"], 1);
+    assert_eq!(result["operations_applied"], 1);
+    assert_eq!(result["failed_operation"], 1);
     assert!(
         result["error"]
             .as_str()
@@ -165,8 +169,8 @@ fn conflicting_patch_stops_after_partial_success() {
 fn first_patch_conflict_reports_zero() {
     let f = Fixture::new();
     let result = f.apply(&[change("example.txt", "wrong", "updated")]);
-    assert_eq!(result["patches_applied"], 0);
-    assert_eq!(result["failed_patch"], 0);
+    assert_eq!(result["operations_applied"], 0);
+    assert_eq!(result["failed_operation"], 0);
     assert_eq!(f.content("example.txt"), "original\n");
 }
 #[test]
@@ -178,25 +182,26 @@ fn invalid_input_is_rejected_before_changes() {
         "[]",
         r#"{"patches":[1]}"#,
         r#"{"patches":[],"repository":"elsewhere"}"#,
+        r#"{"operations":[],"repository":"elsewhere"}"#,
     ] {
         let result = f.raw(input, f.dir.path());
         assert_eq!(result["success"], false);
-        assert_eq!(result["patches_applied"], 0);
-        assert!(result.get("failed_patch").is_none());
+        assert_eq!(result["operations_applied"], 0);
+        assert!(result.get("failed_operation").is_none());
     }
 }
 #[test]
 fn malformed_patch_after_success_preserves_changes() {
     let f = Fixture::new();
     let result = f.apply(&[add("kept.txt", "kept"), "not a diff".into()]);
-    assert_eq!(result["failed_patch"], 1);
-    assert_eq!(result["patches_applied"], 1);
+    assert_eq!(result["failed_operation"], 1);
+    assert_eq!(result["operations_applied"], 1);
     assert_eq!(f.content("kept.txt"), "kept\n");
 }
 #[test]
 fn empty_sequence_succeeds_but_empty_patch_fails() {
     let f = Fixture::new();
-    assert_eq!(f.apply(&[]), json!({"success":true,"patches_applied":0}));
+    assert_eq!(f.apply(&[]), json!({"success":true,"operations_applied":0}));
     assert_eq!(f.apply(&[String::new()])["success"], false);
 }
 #[test]
@@ -220,7 +225,7 @@ fn rejects_traversal_absolute_windows_and_git_metadata_paths() {
     ] {
         let result = f.apply(&[add(path, "escape")]);
         assert_eq!(result["success"], false, "accepted {path}: {result}");
-        assert_eq!(result["failed_patch"], 0);
+        assert_eq!(result["failed_operation"], 0);
     }
     assert!(!outside.path().join("escape.txt").exists());
 }
@@ -231,11 +236,11 @@ fn requires_repository_root() {
     fs::create_dir(&nested).unwrap();
     let outside = tempfile::tempdir().unwrap();
     for cwd in [nested.as_path(), outside.path()] {
-        assert_eq!(f.raw(r#"{"patches":[]}"#, cwd)["success"], false);
+        assert_eq!(f.raw(r#"{"operations":[]}"#, cwd)["success"], false);
     }
     let bare = tempfile::tempdir().unwrap();
     Repository::init_bare(bare.path()).unwrap();
-    assert_eq!(f.raw(r#"{"patches":[]}"#, bare.path())["success"], false);
+    assert_eq!(f.raw(r#"{"operations":[]}"#, bare.path())["success"], false);
 }
 #[test]
 fn missing_input_and_cli_errors_are_json() {
@@ -253,7 +258,7 @@ fn missing_input_and_cli_errors_are_json() {
         assert!(!output.status.success());
         let result: Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(result["success"], false);
-        assert_eq!(result["patches_applied"], 0);
+        assert_eq!(result["operations_applied"], 0);
     }
 }
 #[cfg(unix)]
@@ -326,8 +331,8 @@ fn rejects_patch_created_symlink_before_any_file_is_written() {
 fn unsafe_later_patch_preserves_earlier_success() {
     let f = Fixture::new();
     let result = f.apply(&[add("kept.txt", "kept"), add("../outside.txt", "bad")]);
-    assert_eq!(result["patches_applied"], 1);
-    assert_eq!(result["failed_patch"], 1);
+    assert_eq!(result["operations_applied"], 1);
+    assert_eq!(result["failed_operation"], 1);
     assert_eq!(f.content("kept.txt"), "kept\n");
 }
 #[test]
@@ -378,10 +383,10 @@ fn mixed_inline_and_file_patches_resolve_relative_to_cwd() {
     .unwrap();
     fs::write(
         &input,
-        json!({"patches": [
-            {"type":"inline", "patch":change("example.txt", "original", "first")},
-            {"type":"file", "path":"step.patch"},
-            change("example.txt", "second", "third")
+        json!({"operations": [
+            {"type":"patch", "source":{"type":"inline", "patch":change("example.txt", "original", "first")}},
+            {"type":"patch", "source":{"type":"file", "path":"step.patch"}},
+            {"type":"patch", "source":{"type":"inline", "patch":change("example.txt", "second", "third")}}
         ]})
         .to_string(),
     )
@@ -399,7 +404,7 @@ fn mixed_inline_and_file_patches_resolve_relative_to_cwd() {
     );
     assert_eq!(
         serde_json::from_slice::<Value>(&output.stdout).unwrap(),
-        json!({"success":true,"patches_applied":3})
+        json!({"success":true,"operations_applied":3})
     );
     assert_eq!(f.content("example.txt"), "third\n");
 }
@@ -412,13 +417,13 @@ fn stdin_accepts_mixed_sources_and_reports_json() {
         change("example.txt", "first", "second"),
     )
     .unwrap();
-    let input = json!({"patches": [
-        {"type":"inline", "patch":change("example.txt", "original", "first")},
-        {"type":"file", "path":"change.patch"}
+    let input = json!({"operations": [
+        {"type":"patch", "source":{"type":"inline", "patch":change("example.txt", "original", "first")}},
+        {"type":"patch", "source":{"type":"file", "path":"change.patch"}}
     ]});
     assert_eq!(
         f.stream(&input.to_string()),
-        json!({"success":true,"patches_applied":2})
+        json!({"success":true,"operations_applied":2})
     );
     assert_eq!(f.content("example.txt"), "second\n");
 }
@@ -426,15 +431,15 @@ fn stdin_accepts_mixed_sources_and_reports_json() {
 #[test]
 fn missing_patch_file_after_success_reports_its_index() {
     let f = Fixture::new();
-    let input = json!({"patches": [
-        {"type":"inline", "patch":change("example.txt", "original", "first")},
-        {"type":"file", "path":"missing.patch"},
-        {"type":"inline", "patch":change("example.txt", "first", "never")}
+    let input = json!({"operations": [
+        {"type":"patch", "source":{"type":"inline", "patch":change("example.txt", "original", "first")}},
+        {"type":"patch", "source":{"type":"file", "path":"missing.patch"}},
+        {"type":"patch", "source":{"type":"inline", "patch":change("example.txt", "first", "never")}}
     ]});
     let result = f.stream(&input.to_string());
     assert_eq!(result["success"], false);
-    assert_eq!(result["patches_applied"], 1);
-    assert_eq!(result["failed_patch"], 1);
+    assert_eq!(result["operations_applied"], 1);
+    assert_eq!(result["failed_operation"], 1);
     assert!(result["error"].as_str().unwrap().contains("missing.patch"));
     assert_eq!(f.content("example.txt"), "first\n");
 }
@@ -442,16 +447,17 @@ fn missing_patch_file_after_success_reports_its_index() {
 #[test]
 fn invalid_typed_sources_and_stdin_json_fail_before_application() {
     let f = Fixture::new();
-    for patches in [
-        json!([{"type":"unknown", "patch":"..."}]),
-        json!([{"type":"inline", "path":"wrong"}]),
-        json!([{"type":"file", "patch":"wrong"}]),
-        json!([{"type":"inline", "patch":"...", "extra":true}]),
+    for source in [
+        json!({"type":"unknown", "patch":"..."}),
+        json!({"type":"inline", "path":"wrong"}),
+        json!({"type":"file", "patch":"wrong"}),
+        json!({"type":"inline", "patch":"...", "extra":true}),
+        json!("diff --git ..."),
     ] {
-        let result = f.stream(&json!({"patches":patches}).to_string());
+        let result = f.stream(&json!({"operations":[{"type":"patch", "source":source}]}).to_string());
         assert_eq!(result["success"], false);
-        assert_eq!(result["patches_applied"], 0);
-        assert!(result.get("failed_patch").is_none());
+        assert_eq!(result["operations_applied"], 0);
+        assert!(result.get("failed_operation").is_none());
     }
     assert_eq!(f.stream("{")["success"], false);
     assert_eq!(f.content("example.txt"), "original\n");
@@ -582,7 +588,7 @@ fn invalid_operations_input_fails_before_work() {
     ] {
         let result = f.stream(&input.to_string());
         assert_eq!(result["success"], false);
-        assert_eq!(result["patches_applied"], 0);
+        assert_eq!(result["operations_applied"], 0);
         assert!(result.get("failed_operation").is_none());
     }
     assert_eq!(f.content("example.txt"), "original\n");
@@ -697,7 +703,7 @@ fn accepts_git_c_quoted_paths() {
             "diff --git \"a/{quoted}\" \"b/{quoted}\"\nnew file mode 100644\n--- /dev/null\n+++ \"b/{quoted}\"\n@@ -0,0 +1 @@\n+created\n"
         );
         let result = f.apply(&[patch]);
-        assert_eq!(result, json!({"success":true,"patches_applied":1}));
+        assert_eq!(result, json!({"success":true,"operations_applied":1}));
         assert_eq!(f.content(decoded), "created\n");
     }
     #[cfg(unix)]
@@ -723,7 +729,7 @@ fn rejects_unsafe_git_c_quoted_paths() {
         );
         let result = f.apply(&[patch]);
         assert_eq!(result["success"], false, "accepted {quoted}: {result}");
-        assert_eq!(result["failed_patch"], 0);
+        assert_eq!(result["failed_operation"], 0);
     }
     assert!(!f.dir.path().join("nested").exists());
 }
@@ -735,7 +741,7 @@ fn rejects_non_utf8_git_c_quoted_paths_without_panicking() {
     let patch = "diff --git \"a/\\377.txt\" \"b/\\377.txt\"\nnew file mode 100644\n--- /dev/null\n+++ \"b/\\377.txt\"\n@@ -0,0 +1 @@\n+bad\n";
     let result = f.apply(&[patch.into()]);
     assert_eq!(result["success"], false);
-    assert_eq!(result["failed_patch"], 0);
+    assert_eq!(result["failed_operation"], 0);
     assert!(
         result["error"]
             .as_str()

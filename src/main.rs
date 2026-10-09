@@ -14,7 +14,7 @@ use std::{
 #[derive(Parser)]
 #[command(
     version,
-    about = "Apply ordered Git patches to the current working directory"
+    about = "Apply ordered patches and file operations to the current working directory"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -28,21 +28,8 @@ enum Command {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct PatchInput {
-    patches: Vec<PatchSource>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct OperationInput {
+struct Input {
     operations: Vec<Operation>,
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum Input {
-    Patches(PatchInput),
-    Operations(OperationInput),
 }
 
 #[derive(Deserialize)]
@@ -80,15 +67,8 @@ enum Operation {
 }
 
 #[derive(Deserialize)]
-#[serde(untagged)]
-enum PatchSource {
-    LegacyInline(String),
-    Typed(TypedPatch),
-}
-
-#[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
-enum TypedPatch {
+enum PatchSource {
     Inline { patch: String },
     File { path: PathBuf },
 }
@@ -96,10 +76,8 @@ enum TypedPatch {
 impl PatchSource {
     fn read(&self) -> Result<String, String> {
         match self {
-            Self::LegacyInline(patch) | Self::Typed(TypedPatch::Inline { patch }) => {
-                Ok(patch.clone())
-            }
-            Self::Typed(TypedPatch::File { path }) => fs::read_to_string(path)
+            Self::Inline { patch } => Ok(patch.clone()),
+            Self::File { path } => fs::read_to_string(path)
                 .map_err(|e| format!("Cannot read patch file {}: {e}", path.display())),
         }
     }
@@ -108,12 +86,7 @@ impl PatchSource {
 #[derive(Serialize)]
 struct Outcome {
     success: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    patches_applied: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    operations_applied: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    failed_patch: Option<usize>,
+    operations_applied: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     failed_operation: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -121,12 +94,10 @@ struct Outcome {
 }
 
 impl Outcome {
-    fn failure(applied: usize, failed_patch: Option<usize>, error: String) -> Self {
+    fn failure(error: String) -> Self {
         Self {
             success: false,
-            patches_applied: Some(applied),
-            operations_applied: None,
-            failed_patch,
+            operations_applied: 0,
             failed_operation: None,
             error: Some(error),
         }
@@ -135,20 +106,16 @@ impl Outcome {
     fn operation_failure(applied: usize, failed_operation: usize, error: String) -> Self {
         Self {
             success: false,
-            patches_applied: None,
-            operations_applied: Some(applied),
-            failed_patch: None,
+            operations_applied: applied,
             failed_operation: Some(failed_operation),
             error: Some(error),
         }
     }
 
-    fn success(applied: usize, operations: bool) -> Self {
+    fn success(applied: usize) -> Self {
         Self {
             success: true,
-            patches_applied: (!operations).then_some(applied),
-            operations_applied: operations.then_some(applied),
-            failed_patch: None,
+            operations_applied: applied,
             failed_operation: None,
             error: None,
         }
@@ -167,12 +134,12 @@ fn main() -> ExitCode {
             print!("{error}");
             return ExitCode::SUCCESS;
         }
-        Err(error) => return emit(Outcome::failure(0, None, error.to_string())),
+        Err(error) => return emit(Outcome::failure(error.to_string())),
     };
     let Command::Apply { input } = cli.command;
     emit(match run(&input) {
         Ok(outcome) => outcome,
-        Err(error) => Outcome::failure(0, None, error),
+        Err(error) => Outcome::failure(error),
     })
 }
 
@@ -216,27 +183,12 @@ fn run(input_path: &Path) -> Result<Outcome, String> {
         return Err("Current directory must be the Git repository root".into());
     }
 
-    match input {
-        Input::Patches(input) => {
-            for (index, source) in input.patches.iter().enumerate() {
-                if let Err(error) = source
-                    .read()
-                    .and_then(|patch| apply_patch(&repo, &root, &patch))
-                {
-                    return Ok(Outcome::failure(index, Some(index), error));
-                }
-            }
-            Ok(Outcome::success(input.patches.len(), false))
-        }
-        Input::Operations(input) => {
-            for (index, operation) in input.operations.iter().enumerate() {
-                if let Err(error) = apply_operation(&repo, &root, operation) {
-                    return Ok(Outcome::operation_failure(index, index, error));
-                }
-            }
-            Ok(Outcome::success(input.operations.len(), true))
+    for (index, operation) in input.operations.iter().enumerate() {
+        if let Err(error) = apply_operation(&repo, &root, operation) {
+            return Ok(Outcome::operation_failure(index, index, error));
         }
     }
+    Ok(Outcome::success(input.operations.len()))
 }
 
 fn apply_operation(repo: &Repository, root: &Path, operation: &Operation) -> Result<(), String> {
