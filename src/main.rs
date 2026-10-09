@@ -170,9 +170,9 @@ fn validate_path(root: &Path, path: &Path) -> Result<(), String> {
         }
         resolved.push(name);
         match fs::symlink_metadata(&resolved) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
+            Ok(metadata) if is_symlink_or_reparse_point(&metadata) => {
                 return Err(format!(
-                    "Patch path traverses a symlink: {}",
+                    "Patch path traverses a symlink or reparse point: {}",
                     path.display()
                 ));
             }
@@ -187,4 +187,20 @@ fn validate_path(root: &Path, path: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn is_symlink_or_reparse_point(metadata: &fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
 }

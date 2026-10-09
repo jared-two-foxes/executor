@@ -260,6 +260,32 @@ fn rejects_symlink_ancestors_final_paths_and_dangling_links() {
     assert!(!outside.path().join("new.txt").exists());
     assert!(!outside.path().join("absent.txt").exists());
 }
+
+#[cfg(windows)]
+#[test]
+fn rejects_junction_ancestors() {
+    let f = Fixture::new();
+    let outside = tempfile::tempdir().unwrap();
+    fs::write(outside.path().join("victim.txt"), "original\n").unwrap();
+    let junction = f.dir.path().join("linked");
+    let status = Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(&junction)
+        .arg(outside.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    assert_eq!(
+        f.apply(&[change("linked/victim.txt", "original", "bad")])["success"],
+        false
+    );
+    assert_eq!(
+        fs::read_to_string(outside.path().join("victim.txt")).unwrap(),
+        "original\n"
+    );
+}
+
 #[test]
 fn rejects_patch_created_symlink_before_any_file_is_written() {
     let f = Fixture::new();
