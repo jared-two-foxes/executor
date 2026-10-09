@@ -159,7 +159,6 @@ fn apply_patch(repo: &Repository, root: &Path, patch: &str) -> Result<(), String
     for line in patch.lines().filter(|line| line.starts_with("diff --git ")) {
         let header = &line[11..];
         if header.contains("//")
-            || header.contains('\\')
             || header.starts_with('/')
             || header.starts_with("\"/")
             || header.contains(" /")
@@ -190,7 +189,7 @@ fn apply_patch(repo: &Repository, root: &Path, patch: &str) -> Result<(), String
 
 fn validate_path(root: &Path, path: &Path) -> Result<(), String> {
     let unsafe_path = || format!("Unsafe patch path: {}", path.display());
-    if path.as_os_str().is_empty() {
+    if path.as_os_str().is_empty() || path.as_os_str().to_string_lossy().contains('\\') {
         return Err(unsafe_path());
     }
     let mut resolved = root.to_path_buf();

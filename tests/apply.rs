@@ -225,6 +225,48 @@ fn rejects_traversal_absolute_windows_and_git_metadata_paths() {
     assert!(!outside.path().join("escape.txt").exists());
 }
 #[test]
+fn accepts_git_c_quoted_paths() {
+    let f = Fixture::new();
+    for (quoted, decoded) in [
+        (r"\303\251.txt", "é.txt"),
+        (r"nested/\303\251.txt", "nested/é.txt"),
+    ] {
+        let patch = format!(
+            "diff --git \"a/{quoted}\" \"b/{quoted}\"\nnew file mode 100644\n--- /dev/null\n+++ \"b/{quoted}\"\n@@ -0,0 +1 @@\n+created\n"
+        );
+        let result = f.apply(&[patch]);
+        assert_eq!(result, json!({"success":true,"patches_applied":1}));
+        assert_eq!(f.content(decoded), "created\n");
+    }
+    #[cfg(unix)]
+    {
+        let patch = "diff --git \"a/tab\\tquote\\\".txt\" \"b/tab\\tquote\\\".txt\"\nnew file mode 100644\n--- /dev/null\n+++ \"b/tab\\tquote\\\".txt\"\n@@ -0,0 +1 @@\n+escaped\n";
+        assert_eq!(f.apply(&[patch.into()])["success"], true);
+        assert_eq!(f.content("tab\tquote\".txt"), "escaped\n");
+    }
+}
+
+#[test]
+fn rejects_unsafe_git_c_quoted_paths() {
+    let f = Fixture::new();
+    for quoted in [
+        r"nested\\escape.txt",
+        r"nested\134escape.txt",
+        r"\056\056/escape.txt",
+        r"\056git/config",
+        r"C\072/escape.txt",
+    ] {
+        let patch = format!(
+            "diff --git \"a/{quoted}\" \"b/{quoted}\"\nnew file mode 100644\n--- /dev/null\n+++ \"b/{quoted}\"\n@@ -0,0 +1 @@\n+bad\n"
+        );
+        let result = f.apply(&[patch]);
+        assert_eq!(result["success"], false, "accepted {quoted}: {result}");
+        assert_eq!(result["failed_patch"], 0);
+    }
+    assert!(!f.dir.path().join("nested").exists());
+}
+
+#[test]
 fn requires_repository_root() {
     let f = Fixture::new();
     let nested = f.dir.path().join("nested");
