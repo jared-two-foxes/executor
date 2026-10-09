@@ -3,11 +3,11 @@ use git2::{ApplyLocation, Diff, FileMode, Repository, RepositoryOpenFlags};
 use serde::{Deserialize, Serialize};
 use std::{
     env, fs,
+    fs::OpenOptions,
+    io::Write,
     io::{self, Read},
     path::{Component, Path, PathBuf},
     process::ExitCode,
-    fs::OpenOptions,
-    io::Write,
 };
 
 #[derive(Parser)]
@@ -235,17 +235,20 @@ fn apply_operation(repo: &Repository, root: &Path, operation: &Operation) -> Res
         Operation::DeleteFile { path } => {
             let path = safe_path(root, path)?;
             require_kind(&path, false)?;
-            fs::remove_file(&path).map_err(|e| format!("Cannot delete file {}: {e}", path.display()))
+            fs::remove_file(&path)
+                .map_err(|e| format!("Cannot delete file {}: {e}", path.display()))
         }
         Operation::MoveFile { from, to } => move_path(root, from, to, false),
         Operation::CreateDirectory { path } => {
             let path = safe_path(root, path)?;
-            fs::create_dir(&path).map_err(|e| format!("Cannot create directory {}: {e}", path.display()))
+            fs::create_dir(&path)
+                .map_err(|e| format!("Cannot create directory {}: {e}", path.display()))
         }
         Operation::DeleteDirectory { path } => {
             let path = safe_path(root, path)?;
             require_kind(&path, true)?;
-            fs::remove_dir(&path).map_err(|e| format!("Cannot delete directory {}: {e}", path.display()))
+            fs::remove_dir(&path)
+                .map_err(|e| format!("Cannot delete directory {}: {e}", path.display()))
         }
         Operation::MoveDirectory { from, to } => move_path(root, from, to, true),
     }
@@ -273,9 +276,20 @@ fn move_path(root: &Path, from: &Path, to: &Path, directory: bool) -> Result<(),
     match fs::symlink_metadata(&target) {
         Ok(_) => return Err(format!("Destination already exists: {}", target.display())),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => return Err(format!("Cannot inspect destination {}: {e}", target.display())),
+        Err(e) => {
+            return Err(format!(
+                "Cannot inspect destination {}: {e}",
+                target.display()
+            ));
+        }
     }
-    fs::rename(&source, &target).map_err(|e| format!("Cannot move {} to {}: {e}", source.display(), target.display()))
+    fs::rename(&source, &target).map_err(|e| {
+        format!(
+            "Cannot move {} to {}: {e}",
+            source.display(),
+            target.display()
+        )
+    })
 }
 
 fn apply_patch(repo: &Repository, root: &Path, patch: &str) -> Result<(), String> {

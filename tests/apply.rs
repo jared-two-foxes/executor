@@ -468,7 +468,10 @@ fn operations_create_move_and_delete_files_and_directories() {
         {"type":"delete_file", "path":"published/renamed.txt"},
         {"type":"delete_directory", "path":"published"}
     ]});
-    assert_eq!(f.stream(&input.to_string()), json!({"success":true,"operations_applied":6}));
+    assert_eq!(
+        f.stream(&input.to_string()),
+        json!({"success":true,"operations_applied":6})
+    );
     assert!(!f.dir.path().join("draft").exists());
     assert!(!f.dir.path().join("published").exists());
 }
@@ -476,13 +479,20 @@ fn operations_create_move_and_delete_files_and_directories() {
 #[test]
 fn operations_mix_patch_sources_with_file_changes_in_order() {
     let f = Fixture::new();
-    fs::write(f.dir.path().join("step.patch"), change("example.txt", "first", "second")).unwrap();
+    fs::write(
+        f.dir.path().join("step.patch"),
+        change("example.txt", "first", "second"),
+    )
+    .unwrap();
     let input = json!({"operations": [
         {"type":"patch", "source":{"type":"inline", "patch":change("example.txt", "original", "first")}},
         {"type":"patch", "source":{"type":"file", "path":"step.patch"}},
         {"type":"move_file", "from":"example.txt", "to":"moved.txt"}
     ]});
-    assert_eq!(f.stream(&input.to_string()), json!({"success":true,"operations_applied":3}));
+    assert_eq!(
+        f.stream(&input.to_string()),
+        json!({"success":true,"operations_applied":3})
+    );
     assert_eq!(f.content("moved.txt"), "second\n");
     assert!(!f.dir.path().join("example.txt").exists());
 }
@@ -499,7 +509,12 @@ fn operations_stop_on_failure_and_preserve_previous_changes() {
     assert_eq!(result["success"], false);
     assert_eq!(result["operations_applied"], 1);
     assert_eq!(result["failed_operation"], 1);
-    assert!(result["error"].as_str().unwrap().contains("Destination already exists"));
+    assert!(
+        result["error"]
+            .as_str()
+            .unwrap()
+            .contains("Destination already exists")
+    );
     assert_eq!(f.content("kept.txt"), "kept");
     assert_eq!(f.content("example.txt"), "original\n");
 }
@@ -523,7 +538,13 @@ fn operation_paths_cannot_escape_or_touch_git_metadata() {
     let f = Fixture::new();
     let outside = tempfile::tempdir().unwrap();
     let external = outside.path().join("outside.txt");
-    for path in ["../outside.txt", ".git/config", ".GIT/config", "nested/../../outside.txt", "nested\\outside.txt"] {
+    for path in [
+        "../outside.txt",
+        ".git/config",
+        ".GIT/config",
+        "nested/../../outside.txt",
+        "nested\\outside.txt",
+    ] {
         let input = json!({"operations":[{"type":"create_file","path":path,"content":"bad"}]});
         let result = f.stream(&input.to_string());
         assert_eq!(result["failed_operation"], 0, "{path}: {result}");
@@ -531,7 +552,8 @@ fn operation_paths_cannot_escape_or_touch_git_metadata() {
     let input = json!({"operations":[{"type":"create_file","path":external,"content":"bad"}]});
     assert_eq!(f.stream(&input.to_string())["failed_operation"], 0);
     assert!(!external.exists());
-    let input = json!({"operations":[{"type":"move_file","from":"example.txt","to":"../outside.txt"}]});
+    let input =
+        json!({"operations":[{"type":"move_file","from":"example.txt","to":"../outside.txt"}]});
     assert_eq!(f.stream(&input.to_string())["failed_operation"], 0);
     assert_eq!(f.content("example.txt"), "original\n");
 }
@@ -543,7 +565,8 @@ fn operation_paths_reject_existing_symlink_ancestors() {
     let f = Fixture::new();
     let outside = tempfile::tempdir().unwrap();
     symlink(outside.path(), f.dir.path().join("linked")).unwrap();
-    let input = json!({"operations":[{"type":"create_file","path":"linked/escape.txt","content":"bad"}]});
+    let input =
+        json!({"operations":[{"type":"create_file","path":"linked/escape.txt","content":"bad"}]});
     assert_eq!(f.stream(&input.to_string())["failed_operation"], 0);
     assert!(!outside.path().join("escape.txt").exists());
 }
@@ -555,7 +578,7 @@ fn invalid_operations_input_fails_before_work() {
         json!({"operations":[{"type":"create_file","path":"new.txt"}]}),
         json!({"operations":[{"type":"unknown","path":"new.txt"}]}),
         json!({"operations":[],"patches":[]}),
-        json!({"operations":[{"type":"delete_file","path":"example.txt","extra":true}]})
+        json!({"operations":[{"type":"delete_file","path":"example.txt","extra":true}]}),
     ] {
         let result = f.stream(&input.to_string());
         assert_eq!(result["success"], false);
