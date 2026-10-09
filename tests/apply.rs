@@ -1,6 +1,11 @@
 use git2::{Repository, Signature};
 use serde_json::{Value, json};
-use std::{fs, path::Path, process::Command};
+use std::{
+    fs,
+    io::Write,
+    path::Path,
+    process::{Command, Stdio},
+};
 use tempfile::TempDir;
 
 struct Fixture {
@@ -46,8 +51,24 @@ impl Fixture {
         assert!(output.stderr.is_empty(), "{:?}", output);
         result
     }
+    fn stream(&self, input: &str) -> Value {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_executor"))
+            .args(["apply", "-"])
+            .current_dir(self.dir.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+        let output = child.wait_with_output().unwrap();
+        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(output.status.success(), result["success"].as_bool().unwrap());
+        result
+    }
     fn content(&self, path: &str) -> String {
-        fs::read_to_string(self.dir.path().join(path)).unwrap()
+        fs::read_to_string(self.dir.path().join(path))
+            .unwrap()
+            .replace("\r\n", "\n")
     }
 }
 fn change(path: &str, before: &str, after: &str) -> String {
@@ -285,7 +306,6 @@ fn rejects_junction_ancestors() {
         "original\n"
     );
 }
-
 #[test]
 fn rejects_patch_created_symlink_before_any_file_is_written() {
     let f = Fixture::new();
@@ -336,4 +356,68 @@ fn existing_untracked_file_is_not_overwritten_by_addition() {
     let result = f.apply(&[add("untracked.txt", "overwrite")]);
     assert_eq!(result["success"], false);
     assert_eq!(f.content("untracked.txt"), "existing\n");
+}
+
+#[test]
+fn mixed_inline_and_file_patches_resolve_relative_to_cwd() {
+    let f = Fixture::new();
+    let source = tempfile::tempdir().unwrap();
+    let input = source.path().join("patches.json");
+    fs::write(f.dir.path().join("step.patch"), change("example.txt", "first", "second")).unwrap();
+    fs::write(&input, json!({"patches": [
+        {"type":"inline", "patch":change("example.txt", "original", "first")},
+        {"type":"file", "path":"step.patch"},
+        change("example.txt", "second", "third")
+    ]}).to_string()).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_executor"))
+        .args(["apply"]).arg(input).current_dir(f.dir.path()).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+    assert_eq!(serde_json::from_slice::<Value>(&output.stdout).unwrap(), json!({"success":true,"patches_applied":3}));
+    assert_eq!(f.content("example.txt"), "third\n");
+}
+
+#[test]
+fn stdin_accepts_mixed_sources_and_reports_json() {
+    let f = Fixture::new();
+    fs::write(f.dir.path().join("change.patch"), change("example.txt", "first", "second")).unwrap();
+    let input = json!({"patches": [
+        {"type":"inline", "patch":change("example.txt", "original", "first")},
+        {"type":"file", "path":"change.patch"}
+    ]});
+    assert_eq!(f.stream(&input.to_string()), json!({"success":true,"patches_applied":2}));
+    assert_eq!(f.content("example.txt"), "second\n");
+}
+
+#[test]
+fn missing_patch_file_after_success_reports_its_index() {
+    let f = Fixture::new();
+    let input = json!({"patches": [
+        {"type":"inline", "patch":change("example.txt", "original", "first")},
+        {"type":"file", "path":"missing.patch"},
+        {"type":"inline", "patch":change("example.txt", "first", "never")}
+    ]});
+    let result = f.stream(&input.to_string());
+    assert_eq!(result["success"], false);
+    assert_eq!(result["patches_applied"], 1);
+    assert_eq!(result["failed_patch"], 1);
+    assert!(result["error"].as_str().unwrap().contains("missing.patch"));
+    assert_eq!(f.content("example.txt"), "first\n");
+}
+
+#[test]
+fn invalid_typed_sources_and_stdin_json_fail_before_application() {
+    let f = Fixture::new();
+    for patches in [
+        json!([{"type":"unknown", "patch":"..."}]),
+        json!([{"type":"inline", "path":"wrong"}]),
+        json!([{"type":"file", "patch":"wrong"}]),
+        json!([{"type":"inline", "patch":"...", "extra":true}]),
+    ] {
+        let result = f.stream(&json!({"patches":patches}).to_string());
+        assert_eq!(result["success"], false);
+        assert_eq!(result["patches_applied"], 0);
+        assert!(result.get("failed_patch").is_none());
+    }
+    assert_eq!(f.stream("{")["success"], false);
+    assert_eq!(f.content("example.txt"), "original\n");
 }

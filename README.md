@@ -14,18 +14,24 @@ Run from the **root of the target Git repository**:
 
 ```sh
 executor apply /path/to/patches.json
+cat /path/to/patches.json | executor apply -
 ```
 
-The input contains complete Git unified diffs as JSON strings:
+The argument `-` reads JSON from stdin. The input supports inline diffs and
+file references, in any order:
 
 ```json
 {
   "patches": [
-    "diff --git a/example.txt b/example.txt\n--- a/example.txt\n+++ b/example.txt\n@@ -1 +1 @@\n-original\n+updated\n"
+    {"type": "inline", "patch": "diff --git a/example.txt b/example.txt\n--- a/example.txt\n+++ b/example.txt\n@@ -1 +1 @@\n-original\n+updated\n"},
+    {"type": "file", "path": "next.patch"}
   ]
 }
 ```
 
+File paths are resolved against the current working directory, even when the
+JSON comes from elsewhere or stdin. File references are read when their turn
+arrives. Plain strings in `patches` still work as shorthand for inline diffs.
 Only `patches` is accepted; there is no target repository parameter. An empty
 list succeeds with zero applied patches. An empty or malformed patch fails.
 
@@ -46,7 +52,8 @@ Stdout contains a JSON result, with exit code 0 on success and 1 on failure:
 {"success":false,"patches_applied":1,"failed_patch":1,"error":"Patch could not be applied: ..."}
 ```
 
-`failed_patch` is zero-based. Input, CLI and repository errors have
+`failed_patch` is zero-based, including when a referenced patch file cannot be
+read. Input, CLI and repository errors have
 `patches_applied: 0` and omit `failed_patch` because no patch was attempted.
 `--help` and `--version` display standard CLI text.
 
