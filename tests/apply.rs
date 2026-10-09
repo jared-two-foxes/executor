@@ -266,6 +266,22 @@ fn rejects_unsafe_git_c_quoted_paths() {
     assert!(!f.dir.path().join("nested").exists());
 }
 
+#[cfg(windows)]
+#[test]
+fn rejects_non_utf8_git_c_quoted_paths_without_panicking() {
+    let f = Fixture::new();
+    let patch = "diff --git \"a/\\377.txt\" \"b/\\377.txt\"\nnew file mode 100644\n--- /dev/null\n+++ \"b/\\377.txt\"\n@@ -0,0 +1 @@\n+bad\n";
+    let result = f.apply(&[patch.into()]);
+    assert_eq!(result["success"], false);
+    assert_eq!(result["failed_patch"], 0);
+    assert!(
+        result["error"]
+            .as_str()
+            .unwrap()
+            .contains("Invalid UTF-8 patch path")
+    );
+}
+
 #[test]
 fn requires_repository_root() {
     let f = Fixture::new();

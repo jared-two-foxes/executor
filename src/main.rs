@@ -178,6 +178,10 @@ fn apply_patch(repo: &Repository, root: &Path, patch: &str) -> Result<(), String
             if matches!(file.mode(), FileMode::Link | FileMode::Commit) {
                 return Err("Symlink and submodule patches are not supported".into());
             }
+            #[cfg(windows)]
+            if let Some(bytes) = file.path_bytes() {
+                std::str::from_utf8(bytes).map_err(|_| "Invalid UTF-8 patch path on Windows")?;
+            }
             if let Some(path) = file.path() {
                 validate_path(root, path)?;
             }
