@@ -225,64 +225,6 @@ fn rejects_traversal_absolute_windows_and_git_metadata_paths() {
     assert!(!outside.path().join("escape.txt").exists());
 }
 #[test]
-fn accepts_git_c_quoted_paths() {
-    let f = Fixture::new();
-    for (quoted, decoded) in [
-        (r"\303\251.txt", "é.txt"),
-        (r"nested/\303\251.txt", "nested/é.txt"),
-    ] {
-        let patch = format!(
-            "diff --git \"a/{quoted}\" \"b/{quoted}\"\nnew file mode 100644\n--- /dev/null\n+++ \"b/{quoted}\"\n@@ -0,0 +1 @@\n+created\n"
-        );
-        let result = f.apply(&[patch]);
-        assert_eq!(result, json!({"success":true,"patches_applied":1}));
-        assert_eq!(f.content(decoded), "created\n");
-    }
-    #[cfg(unix)]
-    {
-        let patch = "diff --git \"a/tab\\tquote\\\".txt\" \"b/tab\\tquote\\\".txt\"\nnew file mode 100644\n--- /dev/null\n+++ \"b/tab\\tquote\\\".txt\"\n@@ -0,0 +1 @@\n+escaped\n";
-        assert_eq!(f.apply(&[patch.into()])["success"], true);
-        assert_eq!(f.content("tab\tquote\".txt"), "escaped\n");
-    }
-}
-
-#[test]
-fn rejects_unsafe_git_c_quoted_paths() {
-    let f = Fixture::new();
-    for quoted in [
-        r"nested\\escape.txt",
-        r"nested\134escape.txt",
-        r"\056\056/escape.txt",
-        r"\056git/config",
-        r"C\072/escape.txt",
-    ] {
-        let patch = format!(
-            "diff --git \"a/{quoted}\" \"b/{quoted}\"\nnew file mode 100644\n--- /dev/null\n+++ \"b/{quoted}\"\n@@ -0,0 +1 @@\n+bad\n"
-        );
-        let result = f.apply(&[patch]);
-        assert_eq!(result["success"], false, "accepted {quoted}: {result}");
-        assert_eq!(result["failed_patch"], 0);
-    }
-    assert!(!f.dir.path().join("nested").exists());
-}
-
-#[cfg(windows)]
-#[test]
-fn rejects_non_utf8_git_c_quoted_paths_without_panicking() {
-    let f = Fixture::new();
-    let patch = "diff --git \"a/\\377.txt\" \"b/\\377.txt\"\nnew file mode 100644\n--- /dev/null\n+++ \"b/\\377.txt\"\n@@ -0,0 +1 @@\n+bad\n";
-    let result = f.apply(&[patch.into()]);
-    assert_eq!(result["success"], false);
-    assert_eq!(result["failed_patch"], 0);
-    assert!(
-        result["error"]
-            .as_str()
-            .unwrap()
-            .contains("Invalid UTF-8 patch path")
-    );
-}
-
-#[test]
 fn requires_repository_root() {
     let f = Fixture::new();
     let nested = f.dir.path().join("nested");
@@ -513,4 +455,291 @@ fn invalid_typed_sources_and_stdin_json_fail_before_application() {
     }
     assert_eq!(f.stream("{")["success"], false);
     assert_eq!(f.content("example.txt"), "original\n");
+}
+
+#[test]
+fn operations_create_move_and_delete_files_and_directories() {
+    let f = Fixture::new();
+    let input = json!({"operations": [
+        {"type":"create_directory", "path":"draft"},
+        {"type":"create_file", "path":"draft/note.txt", "content":"hello\n"},
+        {"type":"move_file", "from":"draft/note.txt", "to":"draft/renamed.txt"},
+        {"type":"move_directory", "from":"draft", "to":"published"},
+        {"type":"delete_file", "path":"published/renamed.txt"},
+        {"type":"delete_directory", "path":"published"}
+    ]});
+    assert_eq!(
+        f.stream(&input.to_string()),
+        json!({"success":true,"operations_applied":6})
+    );
+    assert!(!f.dir.path().join("draft").exists());
+    assert!(!f.dir.path().join("published").exists());
+}
+
+#[test]
+fn operations_mix_patch_sources_with_file_changes_in_order() {
+    let f = Fixture::new();
+    fs::write(
+        f.dir.path().join("step.patch"),
+        change("example.txt", "first", "second"),
+    )
+    .unwrap();
+    let input = json!({"operations": [
+        {"type":"patch", "source":{"type":"inline", "patch":change("example.txt", "original", "first")}},
+        {"type":"patch", "source":{"type":"file", "path":"step.patch"}},
+        {"type":"move_file", "from":"example.txt", "to":"moved.txt"}
+    ]});
+    assert_eq!(
+        f.stream(&input.to_string()),
+        json!({"success":true,"operations_applied":3})
+    );
+    assert_eq!(f.content("moved.txt"), "second\n");
+    assert!(!f.dir.path().join("example.txt").exists());
+}
+
+#[test]
+fn operations_stop_on_failure_and_preserve_previous_changes() {
+    let f = Fixture::new();
+    let input = json!({"operations": [
+        {"type":"create_file", "path":"kept.txt", "content":"kept"},
+        {"type":"move_file", "from":"kept.txt", "to":"example.txt"},
+        {"type":"delete_file", "path":"kept.txt"}
+    ]});
+    let result = f.stream(&input.to_string());
+    assert_eq!(result["success"], false);
+    assert_eq!(result["operations_applied"], 1);
+    assert_eq!(result["failed_operation"], 1);
+    assert!(
+        result["error"]
+            .as_str()
+            .unwrap()
+            .contains("Destination already exists")
+    );
+    assert_eq!(f.content("kept.txt"), "kept");
+    assert_eq!(f.content("example.txt"), "original\n");
+}
+
+#[test]
+fn deleting_a_directory_requires_it_to_be_empty() {
+    let f = Fixture::new();
+    let input = json!({"operations": [
+        {"type":"create_directory", "path":"occupied"},
+        {"type":"create_file", "path":"occupied/file.txt", "content":"keep"},
+        {"type":"delete_directory", "path":"occupied"}
+    ]});
+    let result = f.stream(&input.to_string());
+    assert_eq!(result["operations_applied"], 2);
+    assert_eq!(result["failed_operation"], 2);
+    assert_eq!(f.content("occupied/file.txt"), "keep");
+}
+
+#[test]
+fn operation_paths_cannot_escape_or_touch_git_metadata() {
+    let f = Fixture::new();
+    let outside = tempfile::tempdir().unwrap();
+    let external = outside.path().join("outside.txt");
+    for path in [
+        "../outside.txt",
+        ".git/config",
+        ".GIT/config",
+        "nested/../../outside.txt",
+        "nested\\outside.txt",
+    ] {
+        let input = json!({"operations":[{"type":"create_file","path":path,"content":"bad"}]});
+        let result = f.stream(&input.to_string());
+        assert_eq!(result["failed_operation"], 0, "{path}: {result}");
+    }
+    let input = json!({"operations":[{"type":"create_file","path":external,"content":"bad"}]});
+    assert_eq!(f.stream(&input.to_string())["failed_operation"], 0);
+    assert!(!external.exists());
+    let input =
+        json!({"operations":[{"type":"move_file","from":"example.txt","to":"../outside.txt"}]});
+    assert_eq!(f.stream(&input.to_string())["failed_operation"], 0);
+    assert_eq!(f.content("example.txt"), "original\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn operation_paths_reject_existing_symlink_ancestors() {
+    use std::os::unix::fs::symlink;
+    let f = Fixture::new();
+    let outside = tempfile::tempdir().unwrap();
+    symlink(outside.path(), f.dir.path().join("linked")).unwrap();
+    let input =
+        json!({"operations":[{"type":"create_file","path":"linked/escape.txt","content":"bad"}]});
+    assert_eq!(f.stream(&input.to_string())["failed_operation"], 0);
+    assert!(!outside.path().join("escape.txt").exists());
+}
+
+#[test]
+fn invalid_operations_input_fails_before_work() {
+    let f = Fixture::new();
+    for input in [
+        json!({"operations":[{"type":"create_file","path":"new.txt"}]}),
+        json!({"operations":[{"type":"unknown","path":"new.txt"}]}),
+        json!({"operations":[],"patches":[]}),
+        json!({"operations":[{"type":"delete_file","path":"example.txt","extra":true}]}),
+    ] {
+        let result = f.stream(&input.to_string());
+        assert_eq!(result["success"], false);
+        assert_eq!(result["patches_applied"], 0);
+        assert!(result.get("failed_operation").is_none());
+    }
+    assert_eq!(f.content("example.txt"), "original\n");
+}
+
+fn sha256(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+#[test]
+fn replace_file_requires_matching_hash_and_preserves_index() {
+    let f = Fixture::new();
+    let index = fs::read(f.repo.path().join("index")).unwrap();
+    let head = f.repo.head().unwrap().target();
+    let input = json!({"operations":[{
+        "type":"replace_file", "path":"example.txt",
+        "expected_sha256":sha256(b"original\n"), "content":"replacement\n"
+    }]});
+    assert_eq!(
+        f.stream(&input.to_string()),
+        json!({"success":true,"operations_applied":1})
+    );
+    assert_eq!(f.content("example.txt"), "replacement\n");
+    assert_eq!(fs::read(f.repo.path().join("index")).unwrap(), index);
+    assert_eq!(f.repo.head().unwrap().target(), head);
+}
+
+#[test]
+fn replace_file_detects_intervening_edits_without_changing_them() {
+    let f = Fixture::new();
+    fs::write(f.dir.path().join("example.txt"), "dirty\n").unwrap();
+    let input = json!({"operations":[{
+        "type":"replace_file", "path":"example.txt",
+        "expected_sha256":sha256(b"original\n"), "content":"replacement\n"
+    }]});
+    let result = f.stream(&input.to_string());
+    assert_eq!(result["operations_applied"], 0);
+    assert_eq!(result["failed_operation"], 0);
+    assert!(result["error"].as_str().unwrap().contains("hash mismatch"));
+    assert_eq!(f.content("example.txt"), "dirty\n");
+}
+
+#[test]
+fn replace_file_uses_state_after_prior_operations() {
+    let f = Fixture::new();
+    let input = json!({"operations":[
+        {"type":"create_file", "path":"new.txt", "content":"first\n"},
+        {"type":"replace_file", "path":"new.txt", "expected_sha256":sha256(b"first\n"), "content":"second\n"}
+    ]});
+    assert_eq!(
+        f.stream(&input.to_string()),
+        json!({"success":true,"operations_applied":2})
+    );
+    assert_eq!(f.content("new.txt"), "second\n");
+}
+
+#[test]
+fn replace_file_rejects_invalid_hash_and_unsafe_target() {
+    let f = Fixture::new();
+    let invalid_hashes = [String::new(), "abcd".into(), "Z".repeat(64), "A".repeat(64)];
+    for hash in invalid_hashes {
+        let input = json!({"operations":[{
+            "type":"replace_file", "path":"example.txt",
+            "expected_sha256":hash, "content":"bad"
+        }]});
+        assert_eq!(f.stream(&input.to_string())["failed_operation"], 0);
+    }
+    for path in ["../example.txt", ".git/config", "missing.txt"] {
+        let input = json!({"operations":[{
+            "type":"replace_file", "path":path,
+            "expected_sha256":sha256(b"original\n"), "content":"bad"
+        }]});
+        assert_eq!(f.stream(&input.to_string())["failed_operation"], 0);
+    }
+    assert_eq!(f.content("example.txt"), "original\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn replace_file_preserves_executable_permission_and_rejects_symlinks() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let f = Fixture::new();
+    let path = f.dir.path().join("example.txt");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    let input = json!({"operations":[{
+        "type":"replace_file", "path":"example.txt",
+        "expected_sha256":sha256(b"original\n"), "content":"updated\n"
+    }]});
+    assert_eq!(f.stream(&input.to_string())["success"], true);
+    assert_eq!(
+        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o755
+    );
+    symlink(&path, f.dir.path().join("link.txt")).unwrap();
+    let input = json!({"operations":[{
+        "type":"replace_file", "path":"link.txt",
+        "expected_sha256":sha256(b"updated\n"), "content":"bad"
+    }]});
+    assert_eq!(f.stream(&input.to_string())["failed_operation"], 0);
+    assert_eq!(f.content("example.txt"), "updated\n");
+}
+
+#[test]
+fn accepts_git_c_quoted_paths() {
+    let f = Fixture::new();
+    for (quoted, decoded) in [
+        (r"\303\251.txt", "é.txt"),
+        (r"nested/\303\251.txt", "nested/é.txt"),
+    ] {
+        let patch = format!(
+            "diff --git \"a/{quoted}\" \"b/{quoted}\"\nnew file mode 100644\n--- /dev/null\n+++ \"b/{quoted}\"\n@@ -0,0 +1 @@\n+created\n"
+        );
+        let result = f.apply(&[patch]);
+        assert_eq!(result, json!({"success":true,"patches_applied":1}));
+        assert_eq!(f.content(decoded), "created\n");
+    }
+    #[cfg(unix)]
+    {
+        let patch = "diff --git \"a/tab\\tquote\\\".txt\" \"b/tab\\tquote\\\".txt\"\nnew file mode 100644\n--- /dev/null\n+++ \"b/tab\\tquote\\\".txt\"\n@@ -0,0 +1 @@\n+escaped\n";
+        assert_eq!(f.apply(&[patch.into()])["success"], true);
+        assert_eq!(f.content("tab\tquote\".txt"), "escaped\n");
+    }
+}
+
+#[test]
+fn rejects_unsafe_git_c_quoted_paths() {
+    let f = Fixture::new();
+    for quoted in [
+        r"nested\\escape.txt",
+        r"nested\134escape.txt",
+        r"\056\056/escape.txt",
+        r"\056git/config",
+        r"C\072/escape.txt",
+    ] {
+        let patch = format!(
+            "diff --git \"a/{quoted}\" \"b/{quoted}\"\nnew file mode 100644\n--- /dev/null\n+++ \"b/{quoted}\"\n@@ -0,0 +1 @@\n+bad\n"
+        );
+        let result = f.apply(&[patch]);
+        assert_eq!(result["success"], false, "accepted {quoted}: {result}");
+        assert_eq!(result["failed_patch"], 0);
+    }
+    assert!(!f.dir.path().join("nested").exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn rejects_non_utf8_git_c_quoted_paths_without_panicking() {
+    let f = Fixture::new();
+    let patch = "diff --git \"a/\\377.txt\" \"b/\\377.txt\"\nnew file mode 100644\n--- /dev/null\n+++ \"b/\\377.txt\"\n@@ -0,0 +1 @@\n+bad\n";
+    let result = f.apply(&[patch.into()]);
+    assert_eq!(result["success"], false);
+    assert_eq!(result["failed_patch"], 0);
+    assert!(
+        result["error"]
+            .as_str()
+            .unwrap()
+            .contains("Invalid UTF-8 patch path")
+    );
 }
