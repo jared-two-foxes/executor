@@ -34,7 +34,10 @@ impl Fixture {
             .iter()
             .map(|patch| json!({"type":"patch", "source":{"type":"inline", "patch":patch}}))
             .collect();
-        self.raw(&json!({ "operations": operations }).to_string(), self.dir.path())
+        self.raw(
+            &json!({ "operations": operations }).to_string(),
+            self.dir.path(),
+        )
     }
     fn raw(&self, input: &str, cwd: &Path) -> Value {
         // Keep the input outside the target repository.
@@ -454,7 +457,8 @@ fn invalid_typed_sources_and_stdin_json_fail_before_application() {
         json!({"type":"inline", "patch":"...", "extra":true}),
         json!("diff --git ..."),
     ] {
-        let result = f.stream(&json!({"operations":[{"type":"patch", "source":source}]}).to_string());
+        let result =
+            f.stream(&json!({"operations":[{"type":"patch", "source":source}]}).to_string());
         assert_eq!(result["success"], false);
         assert_eq!(result["operations_applied"], 0);
         assert!(result.get("failed_operation").is_none());
