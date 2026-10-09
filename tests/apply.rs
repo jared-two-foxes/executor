@@ -59,10 +59,18 @@ impl Fixture {
             .stdout(Stdio::piped())
             .spawn()
             .unwrap();
-        child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
         let output = child.wait_with_output().unwrap();
         let result: Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(output.status.success(), result["success"].as_bool().unwrap());
+        assert_eq!(
+            output.status.success(),
+            result["success"].as_bool().unwrap()
+        );
         result
     }
     fn content(&self, path: &str) -> String {
@@ -363,28 +371,55 @@ fn mixed_inline_and_file_patches_resolve_relative_to_cwd() {
     let f = Fixture::new();
     let source = tempfile::tempdir().unwrap();
     let input = source.path().join("patches.json");
-    fs::write(f.dir.path().join("step.patch"), change("example.txt", "first", "second")).unwrap();
-    fs::write(&input, json!({"patches": [
-        {"type":"inline", "patch":change("example.txt", "original", "first")},
-        {"type":"file", "path":"step.patch"},
-        change("example.txt", "second", "third")
-    ]}).to_string()).unwrap();
+    fs::write(
+        f.dir.path().join("step.patch"),
+        change("example.txt", "first", "second"),
+    )
+    .unwrap();
+    fs::write(
+        &input,
+        json!({"patches": [
+            {"type":"inline", "patch":change("example.txt", "original", "first")},
+            {"type":"file", "path":"step.patch"},
+            change("example.txt", "second", "third")
+        ]})
+        .to_string(),
+    )
+    .unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_executor"))
-        .args(["apply"]).arg(input).current_dir(f.dir.path()).output().unwrap();
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
-    assert_eq!(serde_json::from_slice::<Value>(&output.stdout).unwrap(), json!({"success":true,"patches_applied":3}));
+        .args(["apply"])
+        .arg(input)
+        .current_dir(f.dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        json!({"success":true,"patches_applied":3})
+    );
     assert_eq!(f.content("example.txt"), "third\n");
 }
 
 #[test]
 fn stdin_accepts_mixed_sources_and_reports_json() {
     let f = Fixture::new();
-    fs::write(f.dir.path().join("change.patch"), change("example.txt", "first", "second")).unwrap();
+    fs::write(
+        f.dir.path().join("change.patch"),
+        change("example.txt", "first", "second"),
+    )
+    .unwrap();
     let input = json!({"patches": [
         {"type":"inline", "patch":change("example.txt", "original", "first")},
         {"type":"file", "path":"change.patch"}
     ]});
-    assert_eq!(f.stream(&input.to_string()), json!({"success":true,"patches_applied":2}));
+    assert_eq!(
+        f.stream(&input.to_string()),
+        json!({"success":true,"patches_applied":2})
+    );
     assert_eq!(f.content("example.txt"), "second\n");
 }
 

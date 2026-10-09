@@ -138,7 +138,10 @@ fn run(input_path: &Path) -> Result<Outcome, String> {
     }
 
     for (index, source) in input.patches.iter().enumerate() {
-        if let Err(error) = source.read().and_then(|patch| apply_patch(&repo, &root, &patch)) {
+        if let Err(error) = source
+            .read()
+            .and_then(|patch| apply_patch(&repo, &root, &patch))
+        {
             return Ok(Outcome::failure(index, Some(index), error));
         }
     }
