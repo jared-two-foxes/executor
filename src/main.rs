@@ -3,6 +3,7 @@ use git2::{ApplyLocation, Diff, FileMode, Repository, RepositoryOpenFlags};
 use serde::{Deserialize, Serialize};
 use std::{
     env, fs,
+    io::{self, Read},
     path::{Component, Path, PathBuf},
     process::ExitCode,
 };
@@ -25,7 +26,33 @@ enum Command {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Input {
-    patches: Vec<String>,
+    patches: Vec<PatchSource>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum PatchSource {
+    LegacyInline(String),
+    Typed(TypedPatch),
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
+enum TypedPatch {
+    Inline { patch: String },
+    File { path: PathBuf },
+}
+
+impl PatchSource {
+    fn read(&self) -> Result<String, String> {
+        match self {
+            Self::LegacyInline(patch) | Self::Typed(TypedPatch::Inline { patch }) => {
+                Ok(patch.clone())
+            }
+            Self::Typed(TypedPatch::File { path }) => fs::read_to_string(path)
+                .map_err(|e| format!("Cannot read patch file {}: {e}", path.display())),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -83,7 +110,15 @@ fn emit(outcome: Outcome) -> ExitCode {
 }
 
 fn run(input_path: &Path) -> Result<Outcome, String> {
-    let bytes = fs::read(input_path).map_err(|e| format!("Cannot read input: {e}"))?;
+    let bytes = if input_path == Path::new("-") {
+        let mut bytes = Vec::new();
+        io::stdin()
+            .read_to_end(&mut bytes)
+            .map_err(|e| format!("Cannot read stdin: {e}"))?;
+        bytes
+    } else {
+        fs::read(input_path).map_err(|e| format!("Cannot read input: {e}"))?
+    };
     let input: Input =
         serde_json::from_slice(&bytes).map_err(|e| format!("Invalid input JSON: {e}"))?;
     let root = env::current_dir()
@@ -102,8 +137,11 @@ fn run(input_path: &Path) -> Result<Outcome, String> {
         return Err("Current directory must be the Git repository root".into());
     }
 
-    for (index, patch) in input.patches.iter().enumerate() {
-        if let Err(error) = apply_patch(&repo, &root, patch) {
+    for (index, source) in input.patches.iter().enumerate() {
+        if let Err(error) = source
+            .read()
+            .and_then(|patch| apply_patch(&repo, &root, &patch))
+        {
             return Ok(Outcome::failure(index, Some(index), error));
         }
     }
@@ -140,6 +178,10 @@ fn apply_patch(repo: &Repository, root: &Path, patch: &str) -> Result<(), String
             if matches!(file.mode(), FileMode::Link | FileMode::Commit) {
                 return Err("Symlink and submodule patches are not supported".into());
             }
+            #[cfg(windows)]
+            if let Some(bytes) = file.path_bytes() {
+                std::str::from_utf8(bytes).map_err(|_| "Invalid UTF-8 patch path on Windows")?;
+            }
             if let Some(path) = file.path() {
                 validate_path(root, path)?;
             }
@@ -151,7 +193,7 @@ fn apply_patch(repo: &Repository, root: &Path, patch: &str) -> Result<(), String
 
 fn validate_path(root: &Path, path: &Path) -> Result<(), String> {
     let unsafe_path = || format!("Unsafe patch path: {}", path.display());
-    if path.as_os_str().is_empty() {
+    if path.as_os_str().is_empty() || path.as_os_str().to_string_lossy().contains('\\') {
         return Err(unsafe_path());
     }
     let mut resolved = root.to_path_buf();
