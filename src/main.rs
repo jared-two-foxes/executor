@@ -72,7 +72,9 @@ fn run(input_path: &Path) -> Outcome {
     };
     let root = match env::current_dir() {
         Ok(root) => root,
-        Err(error) => return Outcome::failure(format!("Cannot resolve current directory: {error}")),
+        Err(error) => {
+            return Outcome::failure(format!("Cannot resolve current directory: {error}"));
+        }
     };
     apply_json(&root, &bytes)
 }
