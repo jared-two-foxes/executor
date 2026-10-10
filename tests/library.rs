@@ -23,7 +23,10 @@ fn library_applies_typed_operations_without_a_child_process() {
     let outcome = apply(dir.path(), &input);
     assert!(outcome.success, "{:?}", outcome.error);
     assert_eq!(outcome.operations_applied, 2);
-    assert_eq!(fs::read_to_string(dir.path().join("second.txt")).unwrap(), "created\n");
+    assert_eq!(
+        fs::read_to_string(dir.path().join("second.txt")).unwrap(),
+        "created\n"
+    );
 }
 
 #[test]
@@ -40,7 +43,10 @@ fn library_reports_partial_failure_without_rolling_back() {
     assert!(!outcome.success);
     assert_eq!(outcome.operations_applied, 1);
     assert_eq!(outcome.failed_operation, Some(1));
-    assert_eq!(fs::read_to_string(dir.path().join("created.txt")).unwrap(), "first");
+    assert_eq!(
+        fs::read_to_string(dir.path().join("created.txt")).unwrap(),
+        "first"
+    );
 }
 
 #[test]
@@ -58,7 +64,10 @@ fn library_resolves_patch_file_sources_relative_to_repository_root() {
     };
     let outcome = apply(dir.path(), &input);
     assert!(outcome.success, "{:?}", outcome.error);
-    assert_eq!(fs::read_to_string(dir.path().join("new.txt")).unwrap(), "hello\n");
+    assert_eq!(
+        fs::read_to_string(dir.path().join("new.txt")).unwrap(),
+        "hello\n"
+    );
 }
 
 #[test]
