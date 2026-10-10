@@ -65,7 +65,9 @@ fn library_resolves_patch_file_sources_relative_to_repository_root() {
     let outcome = apply(dir.path(), &input);
     assert!(outcome.success, "{:?}", outcome.error);
     assert_eq!(
-        fs::read_to_string(dir.path().join("new.txt")).unwrap(),
+        fs::read_to_string(dir.path().join("new.txt"))
+            .unwrap()
+            .replace("\r\n", "\n"),
         "hello\n"
     );
 }
