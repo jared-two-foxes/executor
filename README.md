@@ -1,7 +1,7 @@
 # executor
 
-A small Rust CLI that applies an ordered list of Git patches and file operations
-to the current working directory. Patch application uses `git2` (libgit2);
+A Rust CLI and reusable library that apply an ordered list of Git patches and
+file operations to a Git working tree. Patch application uses `git2` (libgit2);
 executor does not invoke Git or run code from the target repository.
 
 ```sh
@@ -66,3 +66,48 @@ are unsupported. Validation is repeated for each operation against the current
 filesystem. Do not concurrently replace target paths while executor is running.
 
 Run the integration tests with `cargo test --locked`.
+
+## Rust library integration
+
+The `executor` package now exports a library alongside its existing CLI.
+Other Rust projects can depend on the repository directly:
+
+```toml
+[dependencies]
+executor = { git = "https://github.com/jared-two-foxes/executor" }
+```
+
+Call the library with an explicit Git repository root; it does not change the
+process working directory or spawn a separate executor process:
+
+```rust
+use executor::{Input, Operation, apply, apply_json};
+use std::path::Path;
+
+let repo_root = Path::new("/path/to/git-repository");
+let input = Input {
+    operations: vec![Operation::CreateFile {
+        path: "hello.txt".into(),
+        content: "Hello from Rust\\n".into(),
+    }],
+};
+let outcome = apply(repo_root, &input);
+assert!(outcome.success, "{:?}", outcome.error);
+
+// Or pass the existing JSON protocol directly:
+let outcome = apply_json(repo_root, br#"{"operations":[]}"#);
+assert!(outcome.success);
+```
+
+`Input`, `Operation`, `PatchSource`, and `Outcome` are public types.
+`apply_json(root, bytes)` parses the same strict JSON as the CLI;
+`apply(root, &input)` accepts typed operations. Both return `Outcome` with
+`success`, `operations_applied`, `failed_operation`, and `error` fields.
+Invalid JSON or repository paths return a failed outcome without applying
+operations. If a later operation fails, earlier operations remain applied.
+Relative patch-file sources are resolved against the supplied repository root.
+
+The CLI still accepts `executor apply <file>` and `executor apply -` with
+the same output JSON and exit-code contract. Existing CLI integration tests
+continue to exercise that compatibility; `tests/library.rs` exercises the
+in-process API.
