@@ -4,7 +4,10 @@
 //! deserialize [`Input`] and call [`apply`] directly. Both return an [`Outcome`]
 //! preserving the CLI's partial-application and failure semantics.
 
-use git2::{ApplyLocation, Diff, FileMode, Repository, RepositoryOpenFlags};
+mod affected;
+
+use affected::AffectedFiles;
+use git2::{ApplyLocation, Delta, Diff, FileMode, Repository, RepositoryOpenFlags};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -75,6 +78,9 @@ impl PatchSource {
 pub struct Outcome {
     pub success: bool,
     pub operations_applied: usize,
+    /// Sorted, unique repository-relative paths to surviving affected regular files.
+    /// Uses `/` separators and is empty on every failure, including partial execution.
+    pub affected_files: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failed_operation: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -88,6 +94,7 @@ impl Outcome {
             operations_applied: 0,
             failed_operation: None,
             error: Some(error),
+            affected_files: Vec::new(),
         }
     }
 
@@ -97,15 +104,17 @@ impl Outcome {
             operations_applied: applied,
             failed_operation: Some(failed_operation),
             error: Some(error),
+            affected_files: Vec::new(),
         }
     }
 
-    fn success(applied: usize) -> Self {
+    fn success(applied: usize, affected_files: Vec<String>) -> Self {
         Self {
             success: true,
             operations_applied: applied,
             failed_operation: None,
             error: None,
+            affected_files,
         }
     }
 }
@@ -150,19 +159,31 @@ fn apply_checked(repository_root: &Path, input: &Input) -> Result<Outcome, Strin
         return Err("Current directory must be the Git repository root".into());
     }
 
+    let mut affected = AffectedFiles::default();
     for (index, operation) in input.operations.iter().enumerate() {
-        if let Err(error) = apply_operation(&repo, &root, operation) {
+        if let Err(error) = apply_operation(&repo, &root, operation, &mut affected) {
             return Ok(Outcome::operation_failure(index, index, error));
         }
     }
-    Ok(Outcome::success(input.operations.len()))
+    Ok(match affected.finish(&root) {
+        Ok(files) => Outcome::success(input.operations.len(), files),
+        Err(error) => Outcome {
+            operations_applied: input.operations.len(),
+            ..Outcome::failure(error)
+        },
+    })
 }
 
-fn apply_operation(repo: &Repository, root: &Path, operation: &Operation) -> Result<(), String> {
-    match operation {
+fn apply_operation(
+    repo: &Repository,
+    root: &Path,
+    operation: &Operation,
+    affected: &mut AffectedFiles,
+) -> Result<(), String> {
+    let result = match operation {
         Operation::Patch { source } => {
             let patch = source.read(root)?;
-            apply_patch(repo, root, &patch)
+            apply_patch(repo, root, &patch, affected)
         }
         Operation::CreateFile { path, content } => {
             let path = safe_path(root, path)?;
@@ -185,7 +206,7 @@ fn apply_operation(repo: &Repository, root: &Path, operation: &Operation) -> Res
             fs::remove_file(&path)
                 .map_err(|e| format!("Cannot delete file {}: {e}", path.display()))
         }
-        Operation::MoveFile { from, to } => move_path(root, from, to, false),
+        Operation::MoveFile { from, to } => move_path(root, from, to, false).map(|_| ()),
         Operation::CreateDirectory { path } => {
             let path = safe_path(root, path)?;
             fs::create_dir(&path)
@@ -197,8 +218,13 @@ fn apply_operation(repo: &Repository, root: &Path, operation: &Operation) -> Res
             fs::remove_dir(&path)
                 .map_err(|e| format!("Cannot delete directory {}: {e}", path.display()))
         }
-        Operation::MoveDirectory { from, to } => move_path(root, from, to, true),
-    }
+        Operation::MoveDirectory { from, to } => {
+            move_path(root, from, to, true).map(|files| affected.relocate(from, to, files))
+        }
+    };
+    result?;
+    affected.record(operation);
+    Ok(())
 }
 
 fn replace_file(
@@ -251,7 +277,7 @@ fn require_kind(path: &Path, directory: bool) -> Result<(), String> {
     }
 }
 
-fn move_path(root: &Path, from: &Path, to: &Path, directory: bool) -> Result<(), String> {
+fn move_path(root: &Path, from: &Path, to: &Path, directory: bool) -> Result<Vec<PathBuf>, String> {
     let source = safe_path(root, from)?;
     let target = safe_path(root, to)?;
     require_kind(&source, directory)?;
@@ -265,16 +291,28 @@ fn move_path(root: &Path, from: &Path, to: &Path, directory: bool) -> Result<(),
             ));
         }
     }
+    // Reporting errors must fail this move before any rename occurs.
+    let files = if directory {
+        affected::regular_descendants(&source)?
+    } else {
+        Vec::new()
+    };
     fs::rename(&source, &target).map_err(|e| {
         format!(
             "Cannot move {} to {}: {e}",
             source.display(),
             target.display()
         )
-    })
+    })?;
+    Ok(files)
 }
 
-fn apply_patch(repo: &Repository, root: &Path, patch: &str) -> Result<(), String> {
+fn apply_patch(
+    repo: &Repository,
+    root: &Path,
+    patch: &str,
+    affected: &mut AffectedFiles,
+) -> Result<(), String> {
     // libgit2 squashes repeated slashes before exposing paths. Reject these
     // spellings in file headers rather than silently changing their meaning.
     for line in patch.lines().filter(|line| line.starts_with("diff --git ")) {
@@ -309,7 +347,24 @@ fn apply_patch(repo: &Repository, root: &Path, patch: &str) -> Result<(), String
         }
     }
     repo.apply(&diff, ApplyLocation::WorkDir, None)
-        .map_err(|e| format!("Patch could not be applied: {e}"))
+        .map_err(|e| format!("Patch could not be applied: {e}"))?;
+    // Remove sources first: a rename destination may also be another delta's
+    // source. Both passes use the exact diff applied above, never a reread.
+    for delta in diff.deltas() {
+        if matches!(delta.status(), Delta::Deleted | Delta::Renamed)
+            && let Some(path) = delta.old_file().path()
+        {
+            affected.remove(path);
+        }
+    }
+    for delta in diff.deltas() {
+        if delta.status() != Delta::Deleted
+            && let Some(path) = delta.new_file().path()
+        {
+            affected.insert(path);
+        }
+    }
+    Ok(())
 }
 
 fn validate_path(root: &Path, path: &Path) -> Result<(), String> {
