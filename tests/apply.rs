@@ -168,12 +168,7 @@ fn conflicting_edit_stops_after_partial_success() {
     assert_eq!(result["success"], false);
     assert_eq!(result["operations_applied"], 1);
     assert_eq!(result["failed_operation"], 1);
-    assert!(
-        result["error"]
-            .as_str()
-            .unwrap()
-            .contains("missing")
-    );
+    assert!(result["error"].as_str().unwrap().contains("missing"));
     assert_eq!(f.content("example.txt"), "updated\n");
     assert!(!f.dir.path().join("never.txt").exists());
 }
@@ -371,7 +366,6 @@ fn unsafe_move_sources_and_destinations_are_rejected() {
     assert_eq!(f.content("example.txt"), "original\n");
 }
 
-
 #[test]
 fn existing_untracked_file_is_not_overwritten_by_addition() {
     let f = Fixture::new();
@@ -449,7 +443,12 @@ fn removed_patch_types_fail_before_any_cli_operations_execute() {
             assert_eq!(result["operations_applied"], 0);
             assert_eq!(result["affected_files"], json!([]));
             assert!(result.get("failed_operation").is_none());
-            assert!(result["error"].as_str().unwrap().contains("unknown variant `patch`"));
+            assert!(
+                result["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("unknown variant `patch`")
+            );
             assert!(!f.dir.path().join("never.txt").exists());
             assert_eq!(f.content("example.txt"), "original\n");
         }
@@ -686,7 +685,8 @@ fn replace_file_preserves_executable_permission_and_rejects_symlinks() {
 #[test]
 fn accepts_unicode_and_json_escaped_paths() {
     let f = Fixture::new();
-    let input = r#"{"operations":[{"type":"create_file","path":"\u00e9.txt","content":"created\n"}]}"#;
+    let input =
+        r#"{"operations":[{"type":"create_file","path":"\u00e9.txt","content":"created\n"}]}"#;
     assert_eq!(f.stream(input)["affected_files"], json!(["é.txt"]));
     assert_eq!(f.content("é.txt"), "created\n");
     assert_eq!(
@@ -698,7 +698,10 @@ fn accepts_unicode_and_json_escaped_paths() {
     );
     #[cfg(unix)]
     {
-        assert_eq!(f.apply(&[add("tab\tquote\".txt", "escaped")])["success"], true);
+        assert_eq!(
+            f.apply(&[add("tab\tquote\".txt", "escaped")])["success"],
+            true
+        );
         assert_eq!(f.content("tab\tquote\".txt"), "escaped\n");
     }
 }
@@ -743,5 +746,9 @@ fn help_describes_explicit_operations_and_version_remains_text() {
         .output()
         .unwrap();
     assert!(output.status.success());
-    assert!(String::from_utf8(output.stdout).unwrap().starts_with("executor "));
+    assert!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .starts_with("executor ")
+    );
 }

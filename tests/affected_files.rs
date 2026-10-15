@@ -191,11 +191,7 @@ fn moves_and_deletions_compose_with_recreation() {
     );
     succeeds(
         dir.path(),
-        vec![
-            delete("d.rs"),
-            add("d.rs", "after"),
-            delete("d.rs"),
-        ],
+        vec![delete("d.rs"), add("d.rs", "after"), delete("d.rs")],
         &[],
     );
 }

@@ -301,7 +301,10 @@ fn edits_compose_with_creates_moves_and_deletes() {
     assert!(result.success, "{:?}", result.error);
     assert_eq!(result.operations_applied, 10);
     assert_eq!(result.affected_files, ["finished/b.txt"]);
-    assert_eq!(fs::read(f.dir.path().join("finished/b.txt")).unwrap(), b"final");
+    assert_eq!(
+        fs::read(f.dir.path().join("finished/b.txt")).unwrap(),
+        b"final"
+    );
     assert!(!f.dir.path().join("draft").exists());
     assert_eq!(f.bytes(), b"untouched");
 }
@@ -333,7 +336,10 @@ fn executable_permissions_are_preserved_and_symlinks_are_rejected() {
     fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
     let result = f.run(json!([edit("file.txt", "alpha", "updated")]));
     assert!(result.success, "{:?}", result.error);
-    assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o755);
+    assert_eq!(
+        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o755
+    );
     symlink(&path, f.dir.path().join("link.txt")).unwrap();
     symlink("absent", f.dir.path().join("dangling")).unwrap();
     let outside = tempdir().unwrap();
