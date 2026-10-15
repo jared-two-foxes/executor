@@ -47,17 +47,51 @@ Stdout contains JSON; exit code 0 indicates success and nonzero indicates
 failure:
 
 ```json
-{"success":true,"operations_applied":2}
+{"success":true,"operations_applied":2,"affected_files":["src/lib.rs","tests/example.rs"]}
 ```
 
 ```json
-{"success":false,"operations_applied":1,"failed_operation":1,"error":"Patch could not be applied: ..."}
+{"success":false,"operations_applied":1,"affected_files":[],"failed_operation":1,"error":"Patch could not be applied: ..."}
 ```
 
 `operations_applied` counts fully completed operations. `failed_operation` is
 zero-based and is omitted for invalid input, CLI and repository errors, which
 report `operations_applied: 0`. `--help` and `--version` print standard CLI
 text.
+
+## Affected files
+
+`Outcome::affected_files` is a public `Vec<String>`, also always present in JSON.
+Only a fully successful batch populates it. It contains sorted, unique,
+repository-relative paths with `/` separators, at their final locations, to
+surviving regular files targeted or relocated by this execution. Empty
+successful batches and every failure, including partial application, return
+`[]`. This is a successful-batch target list, not a recovery ledger.
+
+Create and replace operations include their targets, even for identical content.
+Patches include additions, modifications and rename destinations, derived from
+the same patch read and applied when the operation runs. Deletes remove targets;
+file moves replace sources with destinations. Directory moves include all
+relocated regular descendants, even those not previously edited. Later moves,
+deletes and recreations update the list in operation order. Directories,
+symlinks, reparse points and other non-regular entries are excluded. Directory
+traversal never follows symlinks or reparse points.
+
+The list is not derived from Git status or a baseline diff: unrelated existing
+working-tree changes are excluded, and files changed back to their original
+content are still included. Reading a patch source does not itself affect it.
+Executor reports metadata only; it does not select or run formatters.
+
+Reporting fails closed rather than returning an incomplete list. Directory
+enumeration errors fail the corresponding move before renaming. Final inspection
+errors or surviving affected non-UTF-8 paths fail after the completed batch, with
+`operations_applied` equal to the full batch length, no `failed_operation`, and
+`affected_files: []`. Applied changes remain in place. Paths are never converted
+lossily; non-UTF-8 paths deleted before finalization do not cause reporting errors.
+
+Adding this public field requires updating Rust struct literals or exhaustive
+patterns for `Outcome`, and JSON consumers that reject unknown output fields.
+Operation input schemas are unchanged.
 
 All source and destination paths are checked before each patch is applied.
 Absolute paths, traversal, Git metadata paths and paths through existing
@@ -102,12 +136,12 @@ assert!(outcome.success);
 `Input`, `Operation`, `PatchSource`, and `Outcome` are public types.
 `apply_json(root, bytes)` parses the same strict JSON as the CLI;
 `apply(root, &input)` accepts typed operations. Both return `Outcome` with
-`success`, `operations_applied`, `failed_operation`, and `error` fields.
+`success`, `operations_applied`, `affected_files`, `failed_operation`, and `error` fields.
 Invalid JSON or repository paths return a failed outcome without applying
 operations. If a later operation fails, earlier operations remain applied.
 Relative patch-file sources are resolved against the supplied repository root.
 
 The CLI still accepts `executor apply <file>` and `executor apply -` with
-the same output JSON and exit-code contract. Existing CLI integration tests
+the extended output JSON above and the same exit-code contract. Existing CLI integration tests
 continue to exercise that compatibility; `tests/library.rs` exercises the
 in-process API.

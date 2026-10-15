@@ -56,6 +56,10 @@ impl Fixture {
             result["success"].as_bool().unwrap()
         );
         assert!(output.stderr.is_empty(), "{:?}", output);
+        assert!(result["affected_files"].is_array(), "{result}");
+        if result["success"] == false {
+            assert_eq!(result["affected_files"], json!([]));
+        }
         result
     }
     fn stream(&self, input: &str) -> Value {
@@ -78,6 +82,10 @@ impl Fixture {
             output.status.success(),
             result["success"].as_bool().unwrap()
         );
+        assert!(result["affected_files"].is_array(), "{result}");
+        if result["success"] == false {
+            assert_eq!(result["affected_files"], json!([]));
+        }
         result
     }
     fn content(&self, path: &str) -> String {
@@ -103,7 +111,7 @@ fn successful_application_only_changes_workdir() {
     let index = fs::read(f.repo.path().join("index")).unwrap();
     assert_eq!(
         f.apply(&[change("example.txt", "original", "updated")]),
-        json!({"success":true,"operations_applied":1})
+        json!({"success":true,"operations_applied":1,"affected_files":["example.txt"]})
     );
     assert_eq!(f.content("example.txt"), "updated\n");
     assert_eq!(fs::read(f.repo.path().join("index")).unwrap(), index);
@@ -117,7 +125,10 @@ fn multiple_patches_and_sequential_dependencies() {
         change("nested/new.txt", "first", "second"),
         change("example.txt", "original", "updated"),
     ]);
-    assert_eq!(result, json!({"success":true,"operations_applied":3}));
+    assert_eq!(
+        result,
+        json!({"success":true,"operations_applied":3,"affected_files":["example.txt","nested/new.txt"]})
+    );
     assert_eq!(f.content("nested/new.txt"), "second\n");
 }
 #[test]
@@ -130,6 +141,10 @@ fn allows_dirty_tracked_and_untracked_files() {
         change("untracked.txt", "existing", "changed"),
     ]);
     assert_eq!(result["success"], true);
+    assert_eq!(
+        result["affected_files"],
+        json!(["example.txt", "untracked.txt"])
+    );
     assert_eq!(f.content("untracked.txt"), "changed\n");
 }
 #[test]
@@ -140,11 +155,12 @@ fn leaves_unrelated_dirty_and_staged_changes_alone() {
     index.add_path(Path::new("staged.txt")).unwrap();
     index.write().unwrap();
     fs::write(f.dir.path().join("staged.txt"), "dirty\n").unwrap();
+    fs::write(f.dir.path().join("unrelated.txt"), "untracked").unwrap();
     let bytes = fs::read(f.repo.path().join("index")).unwrap();
-    assert_eq!(
-        f.apply(&[change("example.txt", "original", "updated")])["success"],
-        true
-    );
+    let result = f.apply(&[change("example.txt", "original", "updated")]);
+    assert_eq!(result["success"], true);
+    assert_eq!(result["affected_files"], json!(["example.txt"]));
+    assert_eq!(f.content("unrelated.txt"), "untracked");
     assert_eq!(f.content("staged.txt"), "dirty\n");
     assert_eq!(fs::read(f.repo.path().join("index")).unwrap(), bytes);
 }
@@ -204,7 +220,10 @@ fn malformed_patch_after_success_preserves_changes() {
 #[test]
 fn empty_sequence_succeeds_but_empty_patch_fails() {
     let f = Fixture::new();
-    assert_eq!(f.apply(&[]), json!({"success":true,"operations_applied":0}));
+    assert_eq!(
+        f.apply(&[]),
+        json!({"success":true,"operations_applied":0,"affected_files":[]})
+    );
     assert_eq!(f.apply(&[String::new()])["success"], false);
 }
 #[test]
@@ -262,6 +281,7 @@ fn missing_input_and_cli_errors_are_json() {
         let result: Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(result["success"], false);
         assert_eq!(result["operations_applied"], 0);
+        assert_eq!(result["affected_files"], json!([]));
     }
 }
 #[cfg(unix)]
@@ -407,7 +427,7 @@ fn mixed_inline_and_file_patches_resolve_relative_to_cwd() {
     );
     assert_eq!(
         serde_json::from_slice::<Value>(&output.stdout).unwrap(),
-        json!({"success":true,"operations_applied":3})
+        json!({"success":true,"operations_applied":3,"affected_files":["example.txt"]})
     );
     assert_eq!(f.content("example.txt"), "third\n");
 }
@@ -426,7 +446,7 @@ fn stdin_accepts_mixed_sources_and_reports_json() {
     ]});
     assert_eq!(
         f.stream(&input.to_string()),
-        json!({"success":true,"operations_applied":2})
+        json!({"success":true,"operations_applied":2,"affected_files":["example.txt"]})
     );
     assert_eq!(f.content("example.txt"), "second\n");
 }
@@ -480,7 +500,7 @@ fn operations_create_move_and_delete_files_and_directories() {
     ]});
     assert_eq!(
         f.stream(&input.to_string()),
-        json!({"success":true,"operations_applied":6})
+        json!({"success":true,"operations_applied":6,"affected_files":[]})
     );
     assert!(!f.dir.path().join("draft").exists());
     assert!(!f.dir.path().join("published").exists());
@@ -501,7 +521,7 @@ fn operations_mix_patch_sources_with_file_changes_in_order() {
     ]});
     assert_eq!(
         f.stream(&input.to_string()),
-        json!({"success":true,"operations_applied":3})
+        json!({"success":true,"operations_applied":3,"affected_files":["moved.txt"]})
     );
     assert_eq!(f.content("moved.txt"), "second\n");
     assert!(!f.dir.path().join("example.txt").exists());
@@ -614,7 +634,7 @@ fn replace_file_requires_matching_hash_and_preserves_index() {
     }]});
     assert_eq!(
         f.stream(&input.to_string()),
-        json!({"success":true,"operations_applied":1})
+        json!({"success":true,"operations_applied":1,"affected_files":["example.txt"]})
     );
     assert_eq!(f.content("example.txt"), "replacement\n");
     assert_eq!(fs::read(f.repo.path().join("index")).unwrap(), index);
@@ -645,7 +665,7 @@ fn replace_file_uses_state_after_prior_operations() {
     ]});
     assert_eq!(
         f.stream(&input.to_string()),
-        json!({"success":true,"operations_applied":2})
+        json!({"success":true,"operations_applied":2,"affected_files":["new.txt"]})
     );
     assert_eq!(f.content("new.txt"), "second\n");
 }
@@ -707,7 +727,10 @@ fn accepts_git_c_quoted_paths() {
             "diff --git \"a/{quoted}\" \"b/{quoted}\"\nnew file mode 100644\n--- /dev/null\n+++ \"b/{quoted}\"\n@@ -0,0 +1 @@\n+created\n"
         );
         let result = f.apply(&[patch]);
-        assert_eq!(result, json!({"success":true,"operations_applied":1}));
+        assert_eq!(
+            result,
+            json!({"success":true,"operations_applied":1,"affected_files":[decoded]})
+        );
         assert_eq!(f.content(decoded), "created\n");
     }
     #[cfg(unix)]
