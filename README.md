@@ -26,7 +26,7 @@ from stdin. The sole input format is an `operations` array, executed in order:
 }
 ```
 
-Operations can interleave patches with `create_file`, `replace_file`,
+Operations can interleave patches with `create_file`, `replace_file`, `edit_file`,
 `delete_file`, `move_file`, `create_directory`, `delete_directory`, and
 `move_directory`. Patch sources must be `inline` or `file`. Referenced patch
 files are read when their operation runs, with paths relative to the current
@@ -59,6 +59,60 @@ zero-based and is omitted for invalid input, CLI and repository errors, which
 report `operations_applied: 0`. `--help` and `--version` print standard CLI
 text.
 
+## Exact-text edits
+
+Use `edit_file` for literal replacements in an existing regular UTF-8 file:
+
+```json
+{
+  "operations": [
+    {
+      "type": "edit_file",
+      "path": "src/example.rs",
+      "edits": [
+        {"oldText": "let old = 1;", "newText": "let new = 2;"},
+        {"oldText": "fn old_name()", "newText": "fn new_name()"}
+      ]
+    }
+  ]
+}
+```
+
+- `edits` must be non-empty. Every `oldText` must be non-empty and occur
+  exactly once in the original contents, including overlapping occurrences:
+  `aa` in `aaa` is ambiguous. Use a longer block to disambiguate a match.
+- All edits resolve against the same contents at the start of that operation,
+  after any earlier operations in the batch. Replacements cannot create or
+  remove matches for other edits in the same operation. Input order does not
+  affect the result. Intersecting match ranges are rejected; adjacent ranges
+  are allowed. Duplicate edits of the same range overlap and are rejected.
+- Both strings are literal: no whitespace, Unicode, case or line-ending
+  normalization occurs. Empty `newText` deletes only the matched text. An
+  identical replacement is valid and still reports the target as affected.
+- Decoding is strict UTF-8, with no binary-content heuristics. Invalid UTF-8
+  (including unsupported encodings such as UTF-16) fails before writing.
+  Valid UTF-8 BOMs, NUL characters and mixed line endings are accepted and
+  preserved wherever untouched.
+- The file must already exist and be regular. The same repository-boundary,
+  metadata-path and symlink/reparse-point protections as other operations apply.
+  `edit_file` never creates files.
+- All edits are validated and the complete result assembled before mutation,
+  then written once to the existing file, preserving permissions. Decoding or
+  validation failures leave that file unchanged. This is not a crash-atomic
+  replacement: OS truncation/write failures may leave partial changes.
+- Runtime errors identify `edit_file` and its path. Match errors name the
+  zero-based edit index and distinguish missing, ambiguous and overlapping
+  matches; overlap errors identify both edits. `failed_operation` retains its
+  existing zero-based meaning. Malformed JSON shapes fail parsing before any
+  operations execute, as for other operations. Earlier successful operations
+  remain applied when a later operation fails.
+
+`patch` remains supported unchanged for unified-diff edits. Conductor consumes
+`executor::Input` directly, so no separate operation allowlist needs changing;
+consumers must update their executor dependency and rebuild to accept the new
+variant. Pi's Conductor adapter forwards the operations array without filtering
+operation types. No consumer source changes are included here.
+
 ## Affected files
 
 `Outcome::affected_files` is a public `Vec<String>`, also always present in JSON.
@@ -68,7 +122,7 @@ surviving regular files targeted or relocated by this execution. Empty
 successful batches and every failure, including partial application, return
 `[]`. This is a successful-batch target list, not a recovery ledger.
 
-Create and replace operations include their targets, even for identical content.
+Create, replace and edit operations include their targets, even for identical content.
 Patches include additions, modifications and rename destinations, derived from
 the same patch read and applied when the operation runs. Deletes remove targets;
 file moves replace sources with destinations. Directory moves include all
@@ -91,7 +145,8 @@ lossily; non-UTF-8 paths deleted before finalization do not cause reporting erro
 
 Adding this public field requires updating Rust struct literals or exhaustive
 patterns for `Outcome`, and JSON consumers that reject unknown output fields.
-Operation input schemas are unchanged.
+The output field does not change existing operation input shapes; the additive
+`edit_file` variant is described above.
 
 All source and destination paths are checked before each patch is applied.
 Absolute paths, traversal, Git metadata paths and paths through existing
@@ -133,7 +188,13 @@ let outcome = apply_json(repo_root, br#"{"operations":[]}"#);
 assert!(outcome.success);
 ```
 
-`Input`, `Operation`, `PatchSource`, and `Outcome` are public types.
+`Input`, `Operation`, `TextEdit`, `PatchSource`, and `Outcome` are public types.
+Construct typed edits with `Operation::EditFile { path, edits }`, where `edits`
+is a `Vec<TextEdit>` and each `TextEdit` has `old_text` and `new_text` strings
+(JSON names `oldText` and `newText`). Rust consumers matching `Operation`
+exhaustively must handle the new variant; existing JSON operation shapes remain
+unchanged. Both operation and edit objects reject unknown fields.
+
 `apply_json(root, bytes)` parses the same strict JSON as the CLI;
 `apply(root, &input)` accepts typed operations. Both return `Outcome` with
 `success`, `operations_applied`, `affected_files`, `failed_operation`, and `error` fields.
@@ -143,5 +204,5 @@ Relative patch-file sources are resolved against the supplied repository root.
 
 The CLI still accepts `executor apply <file>` and `executor apply -` with
 the extended output JSON above and the same exit-code contract. Existing CLI integration tests
-continue to exercise that compatibility; `tests/library.rs` exercises the
-in-process API.
+continue to exercise that compatibility; `tests/library.rs` and
+`tests/edit_file.rs` exercise the in-process API.

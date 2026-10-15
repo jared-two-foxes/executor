@@ -5,6 +5,7 @@
 //! preserving the CLI's partial-application and failure semantics.
 
 mod affected;
+mod edit;
 
 use affected::AffectedFiles;
 use git2::{ApplyLocation, Delta, Diff, FileMode, Repository, RepositoryOpenFlags};
@@ -16,6 +17,14 @@ use std::{
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
 };
+
+/// One literal replacement, resolved against an operation's original file contents.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TextEdit {
+    pub old_text: String,
+    pub new_text: String,
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -37,6 +46,10 @@ pub enum Operation {
         path: PathBuf,
         expected_sha256: String,
         content: String,
+    },
+    EditFile {
+        path: PathBuf,
+        edits: Vec<TextEdit>,
     },
     DeleteFile {
         path: PathBuf,
@@ -200,6 +213,7 @@ fn apply_operation(
             expected_sha256,
             content,
         } => replace_file(root, path, expected_sha256, content),
+        Operation::EditFile { path, edits } => edit::apply(root, path, edits),
         Operation::DeleteFile { path } => {
             let path = safe_path(root, path)?;
             require_kind(&path, false)?;
