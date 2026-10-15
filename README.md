@@ -1,8 +1,8 @@
 # executor
 
-A Rust CLI and reusable library that apply an ordered list of Git patches and
-file operations to a Git working tree. Patch application uses `git2` (libgit2);
-executor does not invoke Git or run code from the target repository.
+A Rust CLI and reusable library that apply ordered file and directory operations
+to a Git working tree. Executor uses `git2` (libgit2) to validate the repository;
+it does not invoke Git or run code from the target repository.
 
 ```sh
 cargo install --path . --locked
@@ -18,30 +18,27 @@ from stdin. The sole input format is an `operations` array, executed in order:
 {
   "operations": [
     {"type": "create_file", "path": "notes.txt", "content": "Hello\n"},
-    {"type": "patch", "source": {"type": "inline", "patch": "diff --git a/example.txt b/example.txt\n--- a/example.txt\n+++ b/example.txt\n@@ -1 +1 @@\n-original\n+updated\n"}},
     {"type": "replace_file", "path": "notes.txt", "expected_sha256": "66a045b452102c59d840ec097d59d9467e13a3f34f6494e539ffd32c1bb35f18", "content": "Updated\n"},
-    {"type": "patch", "source": {"type": "file", "path": "next.patch"}},
+    {"type": "edit_file", "path": "notes.txt", "edits": [{"oldText": "Updated", "newText": "Final"}]},
     {"type": "move_file", "from": "notes.txt", "to": "finished.txt"}
   ]
 }
 ```
 
-Operations can interleave patches with `create_file`, `replace_file`, `edit_file`,
+Supported operations are `create_file`, `edit_file`, `replace_file`,
 `delete_file`, `move_file`, `create_directory`, `delete_directory`, and
-`move_directory`. Patch sources must be `inline` or `file`. Referenced patch
-files are read when their operation runs, with paths relative to the current
-working directory. File content is UTF-8 text. `replace_file` requires the
+`move_directory`. File content is UTF-8 text. `replace_file` requires the
 SHA-256 of the file's current bytes as 64 lowercase hex characters, fails
 without changing the file if that hash differs, and preserves permissions.
 
 Creation requires the parent directory to exist and fails if the target exists.
 Moves fail if the destination exists. Directory deletion requires an empty
-directory. An empty operations list succeeds. A patch with no file changes fails.
+directory. An empty operations list succeeds.
 
 Changes affect the working directory only. Existing staged, uncommitted and
 untracked files are allowed; the index and commits are untouched. On failure,
 executor stops and retains all changes already made, including any changes
-left by a failed patch. It does not roll back, merge or resolve conflicts.
+left by an OS write failure. It does not roll back, merge or resolve conflicts.
 
 Stdout contains JSON; exit code 0 indicates success and nonzero indicates
 failure:
@@ -51,7 +48,7 @@ failure:
 ```
 
 ```json
-{"success":false,"operations_applied":1,"affected_files":[],"failed_operation":1,"error":"Patch could not be applied: ..."}
+{"success":false,"operations_applied":1,"affected_files":[],"failed_operation":1,"error":"edit_file notes.txt: edit 0: oldText match is missing"}
 ```
 
 `operations_applied` counts fully completed operations. `failed_operation` is
@@ -107,11 +104,30 @@ Use `edit_file` for literal replacements in an existing regular UTF-8 file:
   operations execute, as for other operations. Earlier successful operations
   remain applied when a later operation fails.
 
-`patch` remains supported unchanged for unified-diff edits. Conductor consumes
-`executor::Input` directly, so no separate operation allowlist needs changing;
-consumers must update their executor dependency and rebuild to accept the new
-variant. Pi's Conductor adapter forwards the operations array without filtering
-operation types. No consumer source changes are included here.
+## Migration from patch inputs
+
+The `patch` operation has been removed, with no deprecation period or fallback.
+Both former inline and file-source shapes are rejected as unknown operation
+variants. The entire JSON input is parsed before execution: a `patch` anywhere
+in the batch fails parsing with zero operations applied, no `failed_operation`,
+and no file changes, even when preceded by otherwise-valid operations.
+The Rust `Operation::Patch` variant and `PatchSource` type are also removed.
+
+Use `edit_file` for localized text changes, `replace_file` for hash-guarded whole
+file replacement, and the dedicated create/delete/move operations for structural
+changes. A multi-file diff must become a sequence of explicit operations. Parent
+directories must exist; add `create_directory` operations as needed. There is no
+unified-diff import or patch-source-file reading.
+
+Paths are validated per operation, not preflighted across the whole batch.
+Earlier successful operations remain applied if a later operation fails; there
+is no batch transaction or rollback.
+
+Conductor consumes `executor::Input` directly, and Pi forwards the operations
+array without filtering operation types. Consumers must update their executor
+dependency, rebuild, and migrate generated inputs to explicit operations. No
+external consumer source changes are included here. The CLI still accepts a
+JSON input file or stdin; removal of patch-source files does not remove that.
 
 ## Affected files
 
@@ -123,9 +139,7 @@ successful batches and every failure, including partial application, return
 `[]`. This is a successful-batch target list, not a recovery ledger.
 
 Create, replace and edit operations include their targets, even for identical content.
-Patches include additions, modifications and rename destinations, derived from
-the same patch read and applied when the operation runs. Deletes remove targets;
-file moves replace sources with destinations. Directory moves include all
+Deletes remove targets; file moves replace sources with destinations. Directory moves include all
 relocated regular descendants, even those not previously edited. Later moves,
 deletes and recreations update the list in operation order. Directories,
 symlinks, reparse points and other non-regular entries are excluded. Directory
@@ -133,7 +147,7 @@ traversal never follows symlinks or reparse points.
 
 The list is not derived from Git status or a baseline diff: unrelated existing
 working-tree changes are excluded, and files changed back to their original
-content are still included. Reading a patch source does not itself affect it.
+content are still included.
 Executor reports metadata only; it does not select or run formatters.
 
 Reporting fails closed rather than returning an incomplete list. Directory
@@ -148,11 +162,12 @@ patterns for `Outcome`, and JSON consumers that reject unknown output fields.
 The output field does not change existing operation input shapes; the additive
 `edit_file` variant is described above.
 
-All source and destination paths are checked before each patch is applied.
-Absolute paths, traversal, Git metadata paths and paths through existing
-symlinks (including dangling links) are rejected. Symlink and submodule patches
-are unsupported. Validation is repeated for each operation against the current
-filesystem. Do not concurrently replace target paths while executor is running.
+All operation source and destination paths are checked before that operation
+runs. Absolute paths, traversal, Git metadata paths and paths through existing
+symlinks (including dangling links) or reparse points are rejected. File
+operations require regular files. Validation is repeated for each operation
+against the current filesystem. Do not concurrently replace target paths while
+executor is running.
 
 Run the integration tests with `cargo test --locked`.
 
@@ -188,19 +203,19 @@ let outcome = apply_json(repo_root, br#"{"operations":[]}"#);
 assert!(outcome.success);
 ```
 
-`Input`, `Operation`, `TextEdit`, `PatchSource`, and `Outcome` are public types.
+`Input`, `Operation`, `TextEdit`, and `Outcome` are public types.
 Construct typed edits with `Operation::EditFile { path, edits }`, where `edits`
 is a `Vec<TextEdit>` and each `TextEdit` has `old_text` and `new_text` strings
 (JSON names `oldText` and `newText`). Rust consumers matching `Operation`
-exhaustively must handle the new variant; existing JSON operation shapes remain
-unchanged. Both operation and edit objects reject unknown fields.
+exhaustively must handle `EditFile` and remove `Patch` arms. Other existing JSON
+operation shapes remain unchanged. Both operation and edit objects reject unknown fields.
 
 `apply_json(root, bytes)` parses the same strict JSON as the CLI;
 `apply(root, &input)` accepts typed operations. Both return `Outcome` with
 `success`, `operations_applied`, `affected_files`, `failed_operation`, and `error` fields.
 Invalid JSON or repository paths return a failed outcome without applying
 operations. If a later operation fails, earlier operations remain applied.
-Relative patch-file sources are resolved against the supplied repository root.
+All operation paths are resolved against the supplied repository root.
 
 The CLI still accepts `executor apply <file>` and `executor apply -` with
 the extended output JSON above and the same exit-code contract. Existing CLI integration tests

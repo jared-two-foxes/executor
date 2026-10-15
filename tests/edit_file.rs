@@ -284,13 +284,12 @@ fn failure_preserves_prior_success_and_stops_the_batch() {
 }
 
 #[test]
-fn edits_compose_with_patches_creates_moves_and_deletes() {
+fn edits_compose_with_creates_moves_and_deletes() {
     let f = Fixture::new(b"untouched");
-    let patch = "diff --git a/draft/a.txt b/draft/a.txt\n--- a/draft/a.txt\n+++ b/draft/a.txt\n@@ -1 +1 @@\n-one\n+two\n";
     let result = f.run(json!([
         {"type":"create_directory","path":"draft"},
         {"type":"create_file","path":"draft/a.txt","content":"one\n"},
-        {"type":"patch","source":{"type":"inline","patch":patch}},
+        edit("draft/a.txt", "one", "two"),
         edit("draft/a.txt", "two", "three"),
         {"type":"move_file","from":"draft/a.txt","to":"draft/b.txt"},
         edit("draft/b.txt", "three", "four"),
