@@ -1,4 +1,4 @@
-use executor::{Input, Operation, PatchSource, apply, apply_json};
+use executor::{Input, Operation, apply, apply_json};
 use git2::Repository;
 use serde_json::json;
 use std::{fs, path::PathBuf};
@@ -50,26 +50,18 @@ fn library_reports_partial_failure_without_rolling_back() {
 }
 
 #[test]
-fn library_resolves_patch_file_sources_relative_to_repository_root() {
+fn library_resolves_operation_paths_relative_to_repository_root() {
     let dir = tempdir().unwrap();
     Repository::init(dir.path()).unwrap();
-    let patch = "diff --git a/new.txt b/new.txt\nnew file mode 100644\n--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+hello\n";
-    fs::write(dir.path().join("change.patch"), patch).unwrap();
     let input = Input {
-        operations: vec![Operation::Patch {
-            source: PatchSource::File {
-                path: PathBuf::from("change.patch"),
-            },
+        operations: vec![Operation::CreateFile {
+            path: PathBuf::from("new.txt"),
+            content: "hello\n".into(),
         }],
     };
     let outcome = apply(dir.path(), &input);
     assert!(outcome.success, "{:?}", outcome.error);
-    assert_eq!(
-        fs::read_to_string(dir.path().join("new.txt"))
-            .unwrap()
-            .replace("\r\n", "\n"),
-        "hello\n"
-    );
+    assert_eq!(fs::read(dir.path().join("new.txt")).unwrap(), b"hello\n");
 }
 
 #[test]
@@ -87,4 +79,30 @@ fn library_rejects_invalid_json_and_non_root_directories() {
     assert!(!outcome.success);
     assert_eq!(outcome.operations_applied, 0);
     assert!(outcome.error.unwrap().contains("Git repository root"));
+}
+
+#[test]
+fn library_rejects_both_removed_patch_sources_before_execution() {
+    let dir = tempdir().unwrap();
+    Repository::init(dir.path()).unwrap();
+    fs::write(dir.path().join("existing.txt"), "keep").unwrap();
+    for source in [
+        json!({"type":"inline","patch":"diff --git a/a b/a\n"}),
+        json!({"type":"file","path":"missing.patch"}),
+    ] {
+        let input = json!({"operations":[
+            {"type":"create_file","path":"never.txt","content":"never"},
+            {"type":"patch","source":source},
+            {"type":"delete_file","path":"existing.txt"}
+        ]});
+        let outcome = apply_json(dir.path(), input.to_string().as_bytes());
+        assert!(!outcome.success);
+        assert_eq!(outcome.operations_applied, 0);
+        assert_eq!(outcome.failed_operation, None);
+        assert!(outcome.affected_files.is_empty());
+        let error = outcome.error.unwrap();
+        assert!(error.contains("unknown variant `patch`"), "{error}");
+        assert!(!dir.path().join("never.txt").exists());
+        assert_eq!(fs::read(dir.path().join("existing.txt")).unwrap(), b"keep");
+    }
 }

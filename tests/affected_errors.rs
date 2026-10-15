@@ -71,25 +71,28 @@ mod unix {
     }
 
     #[test]
-    fn non_utf8_patch_paths_fail_without_lossy_conversion() {
+    fn non_utf8_edit_paths_fail_without_lossy_conversion() {
+        use executor::TextEdit;
         let dir = tempdir().unwrap();
         Repository::init(dir.path()).unwrap();
-        let text = r#"diff --git "a/\377.rs" "b/\377.rs"
-new file mode 100644
---- /dev/null
-+++ "b/\377.rs"
-@@ -0,0 +1 @@
-+file
-"#;
-        let input = serde_json::json!({"operations":[
-            {"type":"patch","source":{"type":"inline","patch":text}}
-        ]});
-        let outcome = apply_json(dir.path(), &serde_json::to_vec(&input).unwrap());
+        let name = PathBuf::from(OsString::from_vec(vec![0xff]));
+        fs::write(dir.path().join(&name), "before").unwrap();
+        let input = Input {
+            operations: vec![Operation::EditFile {
+                path: name.clone(),
+                edits: vec![TextEdit {
+                    old_text: "before".into(),
+                    new_text: "after".into(),
+                }],
+            }],
+        };
+        let outcome = apply(dir.path(), &input);
         assert!(!outcome.success);
         assert_eq!(outcome.operations_applied, 1);
         assert_eq!(outcome.failed_operation, None);
         assert!(outcome.affected_files.is_empty());
         assert!(outcome.error.unwrap().contains("non-UTF-8"));
+        assert_eq!(fs::read(dir.path().join(name)).unwrap(), b"after");
     }
 
     #[test]

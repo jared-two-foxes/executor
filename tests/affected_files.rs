@@ -40,28 +40,17 @@ fn create(path: &str, content: &str) -> Value {
 fn replace(path: &str, before: &str, after: &str) -> Value {
     json!({"type":"replace_file","path":path,"expected_sha256":hash(before),"content":after})
 }
-fn patch(text: String) -> Value {
-    json!({"type":"patch","source":{"type":"inline","patch":text}})
+fn change(path: &str, before: &str, after: &str) -> Value {
+    json!({"type":"edit_file","path":path,"edits":[{"oldText":before,"newText":after}]})
 }
-fn change(path: &str, before: &str, after: &str) -> String {
-    format!(
-        "diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-{before}\n+{after}\n"
-    )
+fn add(path: &str, content: &str) -> Value {
+    create(path, &format!("{content}\n"))
 }
-fn add(path: &str, content: &str) -> String {
-    format!(
-        "diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1 @@\n+{content}\n"
-    )
+fn delete(path: &str) -> Value {
+    json!({"type":"delete_file","path":path})
 }
-fn delete(path: &str, content: &str) -> String {
-    format!(
-        "diff --git a/{path} b/{path}\ndeleted file mode 100644\n--- a/{path}\n+++ /dev/null\n@@ -1 +0,0 @@\n-{content}\n"
-    )
-}
-fn rename(from: &str, to: &str) -> String {
-    format!(
-        "diff --git a/{from} b/{to}\nsimilarity index 100%\nrename from {from}\nrename to {to}\n"
-    )
+fn rename(from: &str, to: &str) -> Value {
+    json!({"type":"move_file","from":from,"to":to})
 }
 
 #[test]
@@ -90,8 +79,8 @@ fn sorting_normalization_deduplication_and_content_reversion() {
             create("src/z.rs", "original\n"),
             create("src/é.rs", "unicode"),
             create("a.rs", "a"),
-            patch(change("src/z.rs", "original", "temporary")),
-            patch(change("src/z.rs", "temporary", "original")),
+            change("src/z.rs", "original", "temporary"),
+            change("src/z.rs", "temporary", "original"),
             replace("src//./z.rs", "original\n", "original\n"),
         ],
         &["a.rs", "src/z.rs", "src/é.rs"],
@@ -154,7 +143,7 @@ fn directory_moves_include_untouched_files_at_final_locations() {
     succeeds(
         dir.path(),
         vec![
-            patch(change("draft/edit.rs", "old", "new")),
+            change("draft/edit.rs", "old", "new"),
             json!({"type":"move_directory","from":"draft","to":"stage"}),
             json!({"type":"move_directory","from":"stage","to":"final"}),
             json!({"type":"delete_file","path":"final/deleted.rs"}),
@@ -167,72 +156,42 @@ fn directory_moves_include_untouched_files_at_final_locations() {
 }
 
 #[test]
-fn multi_file_patches_delete_earlier_targets_and_report_rename_destinations() {
+fn explicit_operations_delete_earlier_targets_and_report_move_destinations() {
     let dir = fixture();
     for path in ["edit.rs", "gone.rs", "old.rs"] {
         fs::write(dir.path().join(path), "before\n").unwrap();
     }
-    let multi = change("edit.rs", "before", "after")
-        + &add("new.rs", "new")
-        + &delete("gone.rs", "changed")
-        + &rename("old.rs", "renamed.rs");
     succeeds(
         dir.path(),
         vec![
             replace("old.rs", "before\n", "before\n"),
-            patch(change("gone.rs", "before", "changed")),
-            patch(multi),
+            change("gone.rs", "before", "changed"),
+            change("edit.rs", "before", "after"),
+            add("new.rs", "new"),
+            delete("gone.rs"),
+            rename("old.rs", "renamed.rs"),
         ],
         &["edit.rs", "new.rs", "renamed.rs"],
     );
 }
 
 #[test]
-fn patch_renames_and_deletions_compose_with_recreation_and_moves() {
+fn moves_and_deletions_compose_with_recreation() {
     let dir = fixture();
     fs::write(dir.path().join("a.rs"), "before\n").unwrap();
     succeeds(
         dir.path(),
         vec![
-            patch(rename("a.rs", "b.rs")),
+            rename("a.rs", "b.rs"),
             create("a.rs", "reborn"),
-            patch(rename("b.rs", "c.rs")),
+            rename("b.rs", "c.rs"),
             json!({"type":"move_file","from":"c.rs","to":"d.rs"}),
         ],
         &["a.rs", "d.rs"],
     );
     succeeds(
         dir.path(),
-        vec![
-            patch(delete("d.rs", "before")),
-            patch(add("d.rs", "after")),
-            patch(delete("d.rs", "after")),
-        ],
+        vec![delete("d.rs"), add("d.rs", "after"), delete("d.rs")],
         &[],
-    );
-}
-
-#[test]
-fn patch_sources_are_read_after_creation_and_replacement() {
-    let dir = fixture();
-    let first = add("first.rs", "first");
-    let second = add("second.rs", "second");
-    let source = json!({"type":"patch","source":{"type":"file","path":"generated.patch"}});
-    succeeds(
-        dir.path(),
-        vec![
-            create("generated.patch", &first),
-            source.clone(),
-            replace("generated.patch", &first, &second),
-            source,
-            json!({"type":"delete_file","path":"generated.patch"}),
-        ],
-        &["first.rs", "second.rs"],
-    );
-    fs::write(dir.path().join("read-only.patch"), add("third.rs", "third")).unwrap();
-    succeeds(
-        dir.path(),
-        vec![json!({"type":"patch","source":{"type":"file","path":"read-only.patch"}})],
-        &["third.rs"],
     );
 }

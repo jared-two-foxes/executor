@@ -10,7 +10,7 @@ use std::{
 #[derive(Parser)]
 #[command(
     version,
-    about = "Apply ordered patches and file operations to the current working directory"
+    about = "Apply ordered file and directory operations to the current working directory"
 )]
 struct Cli {
     #[command(subcommand)]

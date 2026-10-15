@@ -21,7 +21,9 @@ impl AffectedFiles {
 
     pub(crate) fn record(&mut self, operation: &Operation) {
         match operation {
-            Operation::CreateFile { path, .. } | Operation::ReplaceFile { path, .. } => {
+            Operation::CreateFile { path, .. }
+            | Operation::ReplaceFile { path, .. }
+            | Operation::EditFile { path, .. } => {
                 self.insert(path);
             }
             Operation::DeleteFile { path } => self.remove(path),

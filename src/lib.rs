@@ -1,13 +1,14 @@
-//! Reusable executor library for applying ordered Git patches and file operations.
+//! Reusable executor library for applying ordered file and directory operations.
 //!
 //! The CLI is a thin wrapper around [`apply_json`]. Library consumers can
 //! deserialize [`Input`] and call [`apply`] directly. Both return an [`Outcome`]
 //! preserving the CLI's partial-application and failure semantics.
 
 mod affected;
+mod edit;
 
 use affected::AffectedFiles;
-use git2::{ApplyLocation, Delta, Diff, FileMode, Repository, RepositoryOpenFlags};
+use git2::{Repository, RepositoryOpenFlags};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -16,6 +17,14 @@ use std::{
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
 };
+
+/// One literal replacement, resolved against an operation's original file contents.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TextEdit {
+    pub old_text: String,
+    pub new_text: String,
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -26,9 +35,6 @@ pub struct Input {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {
-    Patch {
-        source: PatchSource,
-    },
     CreateFile {
         path: PathBuf,
         content: String,
@@ -37,6 +43,10 @@ pub enum Operation {
         path: PathBuf,
         expected_sha256: String,
         content: String,
+    },
+    EditFile {
+        path: PathBuf,
+        edits: Vec<TextEdit>,
     },
     DeleteFile {
         path: PathBuf,
@@ -55,23 +65,6 @@ pub enum Operation {
         from: PathBuf,
         to: PathBuf,
     },
-}
-
-#[derive(Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
-pub enum PatchSource {
-    Inline { patch: String },
-    File { path: PathBuf },
-}
-
-impl PatchSource {
-    fn read(&self, root: &Path) -> Result<String, String> {
-        match self {
-            Self::Inline { patch } => Ok(patch.clone()),
-            Self::File { path } => fs::read_to_string(root.join(path))
-                .map_err(|e| format!("Cannot read patch file {}: {e}", path.display())),
-        }
-    }
 }
 
 #[derive(Serialize)]
@@ -133,9 +126,9 @@ pub fn apply_json(repository_root: &Path, input_json: &[u8]) -> Outcome {
 
 /// Apply ordered operations in-process, without spawning the executor CLI.
 ///
-/// The supplied path must identify the Git working-tree root. Relative patch
-/// file sources are resolved against that root, independent of the caller's
-/// current working directory. This function never changes process cwd.
+/// The supplied path must identify the Git working-tree root. All operation
+/// paths are resolved against that root, independent of the caller's current
+/// working directory. This function never changes process cwd.
 pub fn apply(repository_root: &Path, input: &Input) -> Outcome {
     match apply_checked(repository_root, input) {
         Ok(outcome) => outcome,
@@ -161,7 +154,7 @@ fn apply_checked(repository_root: &Path, input: &Input) -> Result<Outcome, Strin
 
     let mut affected = AffectedFiles::default();
     for (index, operation) in input.operations.iter().enumerate() {
-        if let Err(error) = apply_operation(&repo, &root, operation, &mut affected) {
+        if let Err(error) = apply_operation(&root, operation, &mut affected) {
             return Ok(Outcome::operation_failure(index, index, error));
         }
     }
@@ -175,16 +168,11 @@ fn apply_checked(repository_root: &Path, input: &Input) -> Result<Outcome, Strin
 }
 
 fn apply_operation(
-    repo: &Repository,
     root: &Path,
     operation: &Operation,
     affected: &mut AffectedFiles,
 ) -> Result<(), String> {
     let result = match operation {
-        Operation::Patch { source } => {
-            let patch = source.read(root)?;
-            apply_patch(repo, root, &patch, affected)
-        }
         Operation::CreateFile { path, content } => {
             let path = safe_path(root, path)?;
             let mut file = OpenOptions::new()
@@ -200,6 +188,7 @@ fn apply_operation(
             expected_sha256,
             content,
         } => replace_file(root, path, expected_sha256, content),
+        Operation::EditFile { path, edits } => edit::apply(root, path, edits),
         Operation::DeleteFile { path } => {
             let path = safe_path(root, path)?;
             require_kind(&path, false)?;
@@ -307,68 +296,8 @@ fn move_path(root: &Path, from: &Path, to: &Path, directory: bool) -> Result<Vec
     Ok(files)
 }
 
-fn apply_patch(
-    repo: &Repository,
-    root: &Path,
-    patch: &str,
-    affected: &mut AffectedFiles,
-) -> Result<(), String> {
-    // libgit2 squashes repeated slashes before exposing paths. Reject these
-    // spellings in file headers rather than silently changing their meaning.
-    for line in patch.lines().filter(|line| line.starts_with("diff --git ")) {
-        let header = &line[11..];
-        if header.contains("//")
-            || header.starts_with('/')
-            || header.starts_with("\"/")
-            || header.contains(" /")
-            || header.contains(" \"/")
-        {
-            return Err("Unsafe absolute or repeated-separator patch path".into());
-        }
-    }
-    let diff =
-        Diff::from_buffer(patch.as_bytes()).map_err(|e| format!("Invalid Git patch: {e}"))?;
-    if diff.deltas().len() == 0 {
-        return Err("Patch contains no file changes".into());
-    }
-    // Validate every destination and source before any part of this patch is applied.
-    for delta in diff.deltas() {
-        for file in [delta.old_file(), delta.new_file()] {
-            if matches!(file.mode(), FileMode::Link | FileMode::Commit) {
-                return Err("Symlink and submodule patches are not supported".into());
-            }
-            #[cfg(windows)]
-            if let Some(bytes) = file.path_bytes() {
-                std::str::from_utf8(bytes).map_err(|_| "Invalid UTF-8 patch path on Windows")?;
-            }
-            if let Some(path) = file.path() {
-                validate_path(root, path)?;
-            }
-        }
-    }
-    repo.apply(&diff, ApplyLocation::WorkDir, None)
-        .map_err(|e| format!("Patch could not be applied: {e}"))?;
-    // Remove sources first: a rename destination may also be another delta's
-    // source. Both passes use the exact diff applied above, never a reread.
-    for delta in diff.deltas() {
-        if matches!(delta.status(), Delta::Deleted | Delta::Renamed)
-            && let Some(path) = delta.old_file().path()
-        {
-            affected.remove(path);
-        }
-    }
-    for delta in diff.deltas() {
-        if delta.status() != Delta::Deleted
-            && let Some(path) = delta.new_file().path()
-        {
-            affected.insert(path);
-        }
-    }
-    Ok(())
-}
-
 fn validate_path(root: &Path, path: &Path) -> Result<(), String> {
-    let unsafe_path = || format!("Unsafe patch path: {}", path.display());
+    let unsafe_path = || format!("Unsafe operation path: {}", path.display());
     if path.as_os_str().is_empty() || path.as_os_str().to_string_lossy().contains('\\') {
         return Err(unsafe_path());
     }
@@ -390,7 +319,7 @@ fn validate_path(root: &Path, path: &Path) -> Result<(), String> {
         match fs::symlink_metadata(&resolved) {
             Ok(metadata) if is_symlink_or_reparse_point(&metadata) => {
                 return Err(format!(
-                    "Patch path traverses a symlink or reparse point: {}",
+                    "Operation path traverses a symlink or reparse point: {}",
                     path.display()
                 ));
             }
@@ -398,7 +327,7 @@ fn validate_path(root: &Path, path: &Path) -> Result<(), String> {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
                 return Err(format!(
-                    "Cannot inspect patch path {}: {error}",
+                    "Cannot inspect operation path {}: {error}",
                     path.display()
                 ));
             }

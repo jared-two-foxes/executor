@@ -49,16 +49,19 @@ fn empty_batches_directory_operations_and_recreation() {
 }
 
 #[test]
-fn rename_patch_with_content_change() {
+fn move_with_content_change() {
     let dir = fixture();
     fs::write(dir.path().join("old.rs"), "before\n").unwrap();
-    let text = "diff --git a/old.rs b/new.rs\nsimilarity index 50%\nrename from old.rs\nrename to new.rs\nindex 90be1f3056c4f471f977a28497b8d4b392c55a02..294186e497a23bf3fbfde12aacc7f720f668fe9a 100644\n--- a/old.rs\n+++ b/new.rs\n@@ -1 +1 @@\n-before\n+after\n";
     successful_targets(
         dir.path(),
-        vec![json!({"type":"patch","source":{"type":"inline","patch":text}})],
+        vec![
+            json!({"type":"edit_file","path":"old.rs","edits":[{"oldText":"before","newText":"after"}]}),
+            json!({"type":"move_file","from":"old.rs","to":"new.rs"}),
+        ],
         &["new.rs"],
     );
     assert!(!dir.path().join("old.rs").exists());
+    assert_eq!(fs::read(dir.path().join("new.rs")).unwrap(), b"after\n");
 }
 
 #[test]
