@@ -7,7 +7,10 @@ use tempfile::{TempDir, tempdir};
 
 fn fixture() -> TempDir {
     let dir = tempdir().unwrap();
-    Repository::init(dir.path()).unwrap();
+    let repo = Repository::init(dir.path()).unwrap();
+    let mut config = repo.config().unwrap();
+    config.set_bool("core.autocrlf", false).unwrap();
+    config.set_str("core.eol", "lf").unwrap();
     dir
 }
 fn hash(text: &str) -> String {
