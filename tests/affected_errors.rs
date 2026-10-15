@@ -136,7 +136,7 @@ new file mode 100644
         fs::create_dir_all(&restricted).unwrap();
         fs::write(restricted.join("file.rs"), "file").unwrap();
         let permissions = fs::metadata(&restricted).unwrap().permissions();
-        fs::set_permissions(&restricted, fs::Permissions::from_mode(0)).unwrap();
+        fs::set_permissions(&restricted, fs::Permissions::from_mode(0o0)).unwrap();
         // Privileged users bypass permissions; unprivileged Linux CI covers this.
         if fs::read_dir(&restricted).is_ok() {
             fs::set_permissions(&restricted, permissions).unwrap();
